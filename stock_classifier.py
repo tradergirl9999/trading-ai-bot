@@ -80,62 +80,81 @@ RECENT_IPO_DAYS = 420  # ~20 months
 
 def fetch_universe():
     """
-    Pull live stock universe from public Wikipedia tables.
-    S&P 500  → https://en.wikipedia.org/wiki/List_of_S%26P_500_companies
-    NASDAQ 100 → https://en.wikipedia.org/wiki/Nasdaq-100
-    Returns sorted list of unique tickers.
+    Pull live stock universe — no ticker names hardcoded anywhere.
+
+    Sources tried in order (each adds to the pool independently):
+      1. Wikipedia — S&P 500 constituent table
+      2. Wikipedia — NASDAQ 100 constituent table
+      3. Wikipedia — S&P 400 Mid-Cap constituent table
+      4. NASDAQ exchange screener API  (public, no key)
+      5. NYSE exchange screener API    (public, no key)
+      6. SEC EDGAR company tickers     (public, no key)
+
+    Raises RuntimeError only if every source fails.
+    Returns sorted list of unique, clean ticker symbols.
     """
     tickers = set()
     sources = []
     hdrs    = {"User-Agent": "Mozilla/5.0 (compatible; StockScreener/1.0)"}
 
-    # ── S&P 500 ───────────────────────────────────────────────────
-    try:
-        tables = pd.read_html(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            attrs={"id": "constituents"},
-            storage_options={"User-Agent": hdrs["User-Agent"]},
-        )
-        sp = tables[0]["Symbol"].str.replace(".", "-", regex=False).dropna().tolist()
-        tickers.update(sp)
-        sources.append(f"S&P 500 ({len(sp)})")
-    except Exception as e:
+    def _clean(sym):
+        return str(sym).strip().replace(".", "-").upper()
+
+    def _add_wiki(url, min_rows, label):
         try:
-            # fallback: no attrs filter
-            tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+            tables = pd.read_html(url)
             for t in tables:
-                if "Symbol" in t.columns and len(t) >= 490:
-                    sp = t["Symbol"].str.replace(".", "-", regex=False).dropna().tolist()
-                    tickers.update(sp)
-                    sources.append(f"S&P 500 ({len(sp)})")
-                    break
-        except Exception as e2:
-            print(f"  ⚠ S&P 500 fetch failed: {e2}")
+                col = next((c for c in t.columns if c in ("Symbol", "Ticker")), None)
+                if col and len(t) >= min_rows:
+                    syms = [_clean(s) for s in t[col].dropna() if str(s).strip()]
+                    tickers.update(syms)
+                    sources.append(f"{label} ({len(syms)})")
+                    return
+        except Exception as e:
+            print(f"  ⚠ {label} Wikipedia fetch failed: {e}")
 
-    # ── NASDAQ 100 ────────────────────────────────────────────────
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-        for t in tables:
-            col = next((c for c in t.columns if c in ("Ticker", "Symbol")), None)
-            if col and len(t) >= 90:
-                ndx = t[col].dropna().str.strip().tolist()
-                tickers.update(ndx)
-                sources.append(f"NASDAQ 100 ({len(ndx)})")
-                break
-    except Exception as e:
-        print(f"  ⚠ NASDAQ 100 fetch failed: {e}")
+    # ── 1. S&P 500 ────────────────────────────────────────────────
+    _add_wiki("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", 490, "S&P 500")
 
-    # ── Hard fallback so script still runs ────────────────────────
-    if len(tickers) < 50:
-        print("  ⚠ Web fetches failed — using minimal 50-stock fallback universe")
-        tickers.update({
-            "AAPL","MSFT","NVDA","GOOGL","AMZN","META","TSLA","AVGO","JPM","V",
-            "JNJ","UNH","XOM","PG","HD","MA","BAC","COST","ABBV","MRK",
-            "CVX","LLY","NFLX","CRM","TMO","ACN","MCD","AMD","INTC","QCOM",
-            "NOW","ADBE","ORCL","CSCO","PYPL","GS","MS","BLK","RTX","CAT",
-            "NEE","DUK","AMT","PLD","GE","DE","HON","UNP","ETN","LMT",
-        })
-        sources.append("fallback-50")
+    # ── 2. NASDAQ 100 ─────────────────────────────────────────────
+    _add_wiki("https://en.wikipedia.org/wiki/Nasdaq-100", 90, "NASDAQ 100")
+
+    # ── 3. S&P 400 Mid-Cap ────────────────────────────────────────
+    _add_wiki("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", 380, "S&P 400")
+
+    # ── 4 & 5. NASDAQ / NYSE exchange screener (public API) ───────
+    for exchange in ("nasdaq", "nyse"):
+        try:
+            url  = (f"https://api.nasdaq.com/api/screener/stocks"
+                    f"?tableonly=true&limit=5000&exchange={exchange}&download=true")
+            resp = requests.get(url, headers=hdrs, timeout=15)
+            resp.raise_for_status()
+            rows = resp.json().get("data", {}).get("rows") or []
+            syms = [_clean(r["symbol"]) for r in rows if r.get("symbol")]
+            tickers.update(syms)
+            sources.append(f"{exchange.upper()} screener ({len(syms)})")
+        except Exception as e:
+            print(f"  ⚠ {exchange.upper()} screener failed: {e}")
+
+    # ── 6. SEC EDGAR — all registered US public companies ─────────
+    if len(tickers) < 100:
+        try:
+            url  = "https://www.sec.gov/files/company_tickers.json"
+            resp = requests.get(url, headers=hdrs, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            syms = [_clean(v["ticker"]) for v in data.values() if v.get("ticker")]
+            # Keep only short tickers (≤5 chars) — filters out options/warrants
+            syms = [s for s in syms if 1 <= len(s) <= 5 and s.isalpha()]
+            tickers.update(syms)
+            sources.append(f"SEC EDGAR ({len(syms)})")
+        except Exception as e:
+            print(f"  ⚠ SEC EDGAR fetch failed: {e}")
+
+    if not tickers:
+        raise RuntimeError(
+            "All universe sources failed. Check your internet connection and try again."
+        )
 
     result = sorted(tickers)
     print(f"  Sources: {' | '.join(sources)}")
@@ -193,28 +212,10 @@ def fetch_upcoming_ipos():
     except Exception as e:
         print(f"  ⚠ NASDAQ IPO API unavailable: {e}")
 
-    # ── Curated fallback ──────────────────────────────────────────
-    print("  Using curated upcoming IPO list (NASDAQ API unavailable)")
-    return [
-        {"name": "Klarna",   "ticker": "KLAR",  "sector": "Fintech",
-         "valuation": "~$15B", "expected": "2026",
-         "why": "BNPL leader, profitable, expanding US market. IPO multiple likely 8-12x revenue."},
-        {"name": "Cerebras", "ticker": "CBRS",  "sector": "AI Chips",
-         "valuation": "~$4B",  "expected": "2026",
-         "why": "Wafer-Scale Engine — single chip per AI model. Direct NVIDIA competitor potential."},
-        {"name": "StubHub",  "ticker": "TBD",   "sector": "Ticketing",
-         "valuation": "~$16B", "expected": "2026",
-         "why": "Live events rebound. High cash flow, recognised brand."},
-        {"name": "eToro",    "ticker": "ETOR",  "sector": "Fintech",
-         "valuation": "~$3.5B","expected": "2026",
-         "why": "Social trading platform. Profitable 2023. Crypto-revenue exposed."},
-        {"name": "Medline",  "ticker": "MDL",   "sector": "Healthcare",
-         "valuation": "~$30B", "expected": "2026",
-         "why": "Largest US private medical supply. Defensive, recession-resistant."},
-        {"name": "Chime",    "ticker": "TBD",   "sector": "Neobank",
-         "valuation": "~$8B",  "expected": "2026",
-         "why": "22M+ US users, no-fee banking. Watch profitability metrics before committing."},
-    ]
+    # No hardcoded fallback — upcoming IPOs change weekly and any
+    # static list would be stale. Run again later or check nasdaq.com/ipo
+    print("  NASDAQ IPO calendar unavailable — skipping upcoming IPO section")
+    return []
 
 # ================================================================
 #  MATH
