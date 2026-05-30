@@ -1,5 +1,5 @@
 import anthropic
-from tools import search, weather, stocks, reminders, system, maps, fundamentals
+from tools import search, weather, stocks, reminders, system, maps, fundamentals, covariance
 
 
 MODEL = "claude-opus-4-8"
@@ -53,6 +53,12 @@ OVERALL VERDICT: [Strong Buy / Buy / Hold / Sell / Strong Sell]
   TP3 (1yr):    $xxx  (+x%)
 
 KEY METRICS: P/E xx | Rev growth xx% | FCF $xB | RSI xx | Analyst target $xxx
+
+## Covariance / Correlation / Diversification
+When asked about covariance, correlation, beta, diversification, hedging, or how a stock relates to the market:
+1. get_covariance_analysis — runs full Cov(X,Y)=E[XY]-E[X]E[Y] across all benchmarks and windows
+2. Explain the Market Dependency Score, beta, and portfolio implications in plain English.
+3. Give actionable verdict: is it good for diversification? Can it hedge? How much systematic risk?
 
 ## IPO Analysis — follow this sequence
 When asked about an IPO:
@@ -165,6 +171,24 @@ TOOLS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "get_covariance_analysis",
+        "description": (
+            "Full covariance analysis: Cov(X,Y)=E[XY]-E[X]E[Y] for a stock vs S&P 500, "
+            "Nasdaq 100, Sector ETF, Gold, Bitcoin — across 30d/90d/180d/1y windows. "
+            "Returns covariance table, correlation, beta, Market Dependency Score (0-100), "
+            "diversification benefit, hedging benefit, portfolio risk contribution, "
+            "and systematic risk exposure. Use when asked about covariance, correlation, "
+            "beta, diversification, hedging, or how a stock relates to the market."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Stock ticker symbol"},
+            },
             "required": ["symbol"],
         },
     },
@@ -295,7 +319,8 @@ _DISPATCH = {
     "get_earnings_history": lambda a: fundamentals.get_earnings_history(a["symbol"]),
     "get_income_statement": lambda a: fundamentals.get_income_statement(a["symbol"]),
     "get_cashflow_statement":lambda a: fundamentals.get_cashflow_statement(a["symbol"]),
-    "get_ipo_data":         lambda a: fundamentals.get_ipo_data(a["company"]),
+    "get_covariance_analysis": lambda a: covariance.get_covariance_analysis(a["symbol"]),
+    "get_ipo_data":            lambda a: fundamentals.get_ipo_data(a["company"]),
     "get_market_overview":  lambda a: stocks.get_market_overview(),
     "set_reminder":         lambda a: reminders.set_reminder(a["message"], a["minutes"]),
     "list_reminders":       lambda a: reminders.list_reminders(),
