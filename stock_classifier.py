@@ -185,42 +185,58 @@ def fetch_universe():
     return result
 
 
-def bulk_download(syms, period, batch_size=BATCH_SIZE):
+def bulk_download_ohlcv(syms, period, batch_size=BATCH_SIZE):
     """
-    Download Close prices for all symbols in batches.
-    yfinance has a URL length limit — sending thousands of tickers at once
-    causes 'unexpected character' errors. Batching fixes this.
-    Returns a single DataFrame with one column per symbol.
+    Download Open/High/Low/Close/Volume for all symbols in batches.
+    Returns dict: { ticker_str → DataFrame(Close, High, Low, Volume) }
+
+    Why not a single yf.download() call?
+    • URL length limit — thousands of symbols overflow the request
+    • yfinance silently returns nothing rather than raising an error
     """
-    frames  = []
+    ohlcv = {}
     batches = [syms[i:i+batch_size] for i in range(0, len(syms), batch_size)]
     total_b = len(batches)
 
     for i, batch in enumerate(batches, 1):
         try:
-            raw = yf.download(batch, period=period, auto_adjust=True, progress=False)
-            # yfinance ≥0.2 returns MultiIndex columns; extract Close level
+            raw = yf.download(batch, period=period, auto_adjust=True,
+                              progress=False, threads=True)
+
+            if raw.empty:
+                continue
+
+            # yfinance ≥0.2 uses MultiIndex columns: (field, ticker)
             if isinstance(raw.columns, pd.MultiIndex):
-                raw = raw["Close"]
-            elif "Close" in raw.columns:
-                raw = raw[["Close"]]
-            if isinstance(raw, pd.Series):
-                raw = raw.to_frame(batch[0])
-            frames.append(raw)
-        except Exception as e:
-            pass   # failed batches are silently skipped; stocks just won't appear
-        if i % 3 == 0 or i == total_b:
+                for sym in batch:
+                    try:
+                        df = pd.DataFrame({
+                            "Close":  raw["Close"][sym],
+                            "High":   raw["High"][sym],
+                            "Low":    raw["Low"][sym],
+                            "Volume": raw["Volume"][sym],
+                        }).dropna(subset=["Close"])
+                        if len(df) >= 60:
+                            ohlcv[sym] = df
+                    except Exception:
+                        pass
+            else:
+                # Single-ticker batch or old yfinance format
+                if "Close" in raw.columns and len(batch) == 1:
+                    df = raw[["Close","High","Low","Volume"]].dropna(subset=["Close"])
+                    if len(df) >= 60:
+                        ohlcv[batch[0]] = df
+
+        except Exception:
+            pass
+
+        if i % 2 == 0 or i == total_b:
             pct = i / total_b * 100
             bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
-            print(f"  [{bar}] {pct:.0f}%  batch {i}/{total_b}", end="\r")
+            print(f"  [{bar}] {pct:.0f}%  batch {i}/{total_b}  ({len(ohlcv)} loaded)", end="\r")
 
     print()
-    if not frames:
-        raise RuntimeError("All download batches failed. Check internet connection.")
-
-    combined = pd.concat(frames, axis=1)
-    # Drop duplicate columns (can happen if a ticker appears in both exchanges)
-    return combined.loc[:, ~combined.columns.duplicated()]
+    return ohlcv
 
 
 def fetch_upcoming_ipos():
@@ -590,21 +606,31 @@ def build_reasons(t, b_val, r_val, cat, ar, sh, av, pe, fwd_pe, rev_g, margin, r
     return reasons
 
 # ================================================================
-#  SINGLE STOCK ANALYSER (runs in background thread)
+#  PHASE 1 — PRICE + TECHNICAL ANALYSIS  (no HTTP calls)
+#  Runs in parallel across all 1500 stocks using pre-downloaded data.
 # ================================================================
 
-def analyse(sym, mkt_returns, bulk_prices):
+def analyse_price(sym, mkt_ret, ohlcv):
+    """
+    Pure computation — no network calls.
+    Uses pre-downloaded OHLCV dict so Yahoo Finance rate limits can't
+    kill the analysis. Returns a lightweight result without fundamentals;
+    those are fetched separately only for the ~50 final top picks.
+    """
     try:
-        if sym not in bulk_prices.columns:
+        if sym not in ohlcv:
+            return None
+        hist = ohlcv[sym]
+        if len(hist) < 60:
             return None
 
-        tk   = yf.Ticker(sym)
-        hist = tk.history(period=PERIOD, auto_adjust=True)
-        if hist.empty or len(hist) < 60:
-            return None
+        close  = hist["Close"]
+        high   = hist["High"]
+        low    = hist["Low"]
+        volume = hist["Volume"]
 
-        s_ret = hist["Close"].pct_change().dropna()
-        m_ret = mkt_returns.reindex(s_ret.index).dropna()
+        s_ret = close.pct_change().dropna()
+        m_ret = mkt_ret.reindex(s_ret.index).dropna()
         s_ret = s_ret.reindex(m_ret.index)
         if len(s_ret) < 50:
             return None
@@ -617,7 +643,7 @@ def analyse(sym, mkt_returns, bulk_prices):
         av_val = ann_vol(s_ret)
         cat    = classify(b_val, r_val)
 
-        t          = technicals(hist["Close"], hist["High"], hist["Low"], hist["Volume"])
+        t          = technicals(close, high, low, volume)
         price      = t["price"]
         hist_days  = len(hist)
         last_close = hist.index[-1].strftime("%d %b %Y")
@@ -628,28 +654,41 @@ def analyse(sym, mkt_returns, bulk_prices):
             for idx, (label, days) in enumerate(TIMEFRAMES)
         }
 
-        info   = tk.info
-        pe     = info.get("trailingPE")
-        fwd_pe = info.get("forwardPE")
-        rev_g  = info.get("revenueGrowth")
-        margin = info.get("profitMargins")
-        mktcap = info.get("marketCap")
-        name   = info.get("longName") or info.get("shortName", sym)
-        sector = info.get("sector", "")
-        target = info.get("targetMeanPrice")
-
         return dict(
-            symbol=sym, name=name, sector=sector, category=cat,
+            symbol=sym, name=sym, sector="", category=cat,
             price=price, last_close=last_close,
             beta=b_val, cov=c_val, corr=r_val,
             sharpe=sh_val, ann_ret=ar_val, ann_vol=av_val,
             tech=t, preds=preds,
-            pe=pe, fwd_pe=fwd_pe, rev_g=rev_g,
-            margin=margin, mktcap=mktcap, target=target,
+            pe=None, fwd_pe=None, rev_g=None,
+            margin=None, mktcap=None, target=None,
             hist_days=hist_days, ipo_date=ipo_date,
         )
     except Exception:
         return None
+
+
+# ================================================================
+#  PHASE 2 — FUNDAMENTAL ENRICHMENT  (only for top picks)
+#  ~50 tk.info calls instead of 1500 — no rate limiting.
+# ================================================================
+
+def enrich_fundamentals(result):
+    """Fetch tk.info for one stock and update name/sector/PE/etc. in place."""
+    sym = result["symbol"]
+    try:
+        info = yf.Ticker(sym).info
+        result["name"]   = info.get("longName") or info.get("shortName", sym)
+        result["sector"] = info.get("sector", "")
+        result["pe"]     = info.get("trailingPE")
+        result["fwd_pe"] = info.get("forwardPE")
+        result["rev_g"]  = info.get("revenueGrowth")
+        result["margin"] = info.get("profitMargins")
+        result["mktcap"] = info.get("marketCap")
+        result["target"] = info.get("targetMeanPrice")
+    except Exception:
+        pass   # display sym as name; PE etc. will show as N/A
+    return result
 
 # ================================================================
 #  RANKING
@@ -685,52 +724,71 @@ UPCOMING_IPOS = fetch_upcoming_ipos()
 #  STEP 1 — DOWNLOAD
 # ================================================================
 
-print(f"\n  [1/4] Downloading price data — {len(UNIVERSE)} stocks in batches of {BATCH_SIZE}…")
+print(f"\n  [1/4] Downloading OHLCV — {len(UNIVERSE)} stocks in batches of {BATCH_SIZE}…")
 
-# Download market benchmark first (always needed)
+# ── Market benchmark ──────────────────────────────────────────────
 mkt_raw = yf.download(MARKET, period=PERIOD, auto_adjust=True, progress=False)
 if isinstance(mkt_raw.columns, pd.MultiIndex):
     mkt_raw = mkt_raw["Close"]
-mkt_series = mkt_raw.squeeze() if isinstance(mkt_raw, pd.DataFrame) else mkt_raw
+mkt_close = mkt_raw.squeeze() if isinstance(mkt_raw, pd.DataFrame) else mkt_raw
+mkt_ret   = mkt_close.pct_change().dropna()
 
-# Download all stocks in batches
-bulk = bulk_download(UNIVERSE, PERIOD, BATCH_SIZE)
-bulk[MARKET] = mkt_series   # inject benchmark column
+DATA_START = mkt_close.index[0].strftime("%d %b %Y")
+DATA_END   = mkt_close.index[-1].strftime("%d %b %Y")
 
-mkt_ret    = bulk[MARKET].pct_change().dropna()
-DATA_START = bulk.index[0].strftime("%d %b %Y")
-DATA_END   = bulk.index[-1].strftime("%d %b %Y")
-loaded     = bulk.shape[1] - 1   # exclude benchmark column
-print(f"  ✓ {loaded} tickers loaded  |  {len(bulk)} trading days")
-print(f"  ✓ Data range: {DATA_START}  →  {DATA_END}")
+# ── Stocks: full OHLCV downloaded in batches — no per-stock HTTP calls ──
+ohlcv_data = bulk_download_ohlcv(UNIVERSE, PERIOD, BATCH_SIZE)
+print(f"  ✓ {len(ohlcv_data)} tickers loaded  |  Data range: {DATA_START}  →  {DATA_END}")
 
 # ================================================================
-#  STEP 2 — PARALLEL ANALYSIS
+#  STEP 2 — PARALLEL ANALYSIS  (pure computation, no HTTP)
 # ================================================================
 
-print(f"\n  [2/4] Analysing all stocks in background ({WORKERS} threads)…")
+print(f"\n  [2/4] Classifying & scoring {len(ohlcv_data)} stocks ({WORKERS} threads)…")
 t0      = time.time()
 results = []
 done    = 0
-total   = len(UNIVERSE)
+syms    = list(ohlcv_data.keys())
+total   = len(syms)
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as ex:
-    futures = {ex.submit(analyse, sym, mkt_ret, bulk): sym for sym in UNIVERSE}
+    futures = {ex.submit(analyse_price, sym, mkt_ret, ohlcv_data): sym for sym in syms}
     for fut in concurrent.futures.as_completed(futures):
         done += 1
         res = fut.result()
         if res:
             results.append(res)
-        if done % 20 == 0 or done == total:
+        if done % 50 == 0 or done == total:
             pct = done / total * 100
             bar = "█" * int(pct/5) + "░" * (20 - int(pct/5))
             print(f"  [{bar}] {pct:.0f}%  ({done}/{total}, {len(results)} valid)", end="\r")
 
 elapsed = time.time() - t0
-print(f"\n  ✓ Done in {elapsed:.1f}s — {len(results)} stocks analysed\n")
+print(f"\n  ✓ {len(results)} stocks classified in {elapsed:.1f}s")
 
+# ── Enrich top picks with fundamentals (tk.info) ─────────────────
 df_all  = pd.DataFrame([{k:v for k,v in r.items() if k not in ("tech","preds")} for r in results])
 res_map = {r["symbol"]: r for r in results}
+
+top_syms = set()
+for cat in CATEGORIES:
+    sub = df_all[df_all["category"] == cat]
+    if not sub.empty:
+        top_syms.update(rank_df(sub, cat).head(TOP_N)["symbol"].tolist())
+
+# Also include recent IPO candidates
+recent_mask = df_all["hist_days"] < RECENT_IPO_DAYS
+top_syms.update(df_all[recent_mask].nlargest(10, "ann_ret")["symbol"].tolist())
+
+print(f"\n  Fetching fundamentals for {len(top_syms)} top picks…")
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+    futs = {ex.submit(enrich_fundamentals, res_map[s]): s for s in top_syms if s in res_map}
+    for fut in concurrent.futures.as_completed(futs):
+        fut.result()   # updates res_map[sym] in place
+print(f"  ✓ Fundamentals loaded\n")
+
+# Rebuild df_all so name/sector/pe columns reflect the enriched values
+df_all  = pd.DataFrame([{k:v for k,v in r.items() if k not in ("tech","preds")} for r in results])
 
 # ================================================================
 #  STEP 3 — PRINT RESULTS
