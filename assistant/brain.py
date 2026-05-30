@@ -1,195 +1,246 @@
 import anthropic
-from tools import search, weather, stocks, reminders, system, maps
+from tools import search, weather, stocks, reminders, system, maps, fundamentals
 
 MODEL = "claude-opus-4-8"
 
-SYSTEM_PROMPT = """You are Jarvis, a brilliant personal AI assistant. You live on the user's Windows desktop and respond via voice (text-to-speech), so keep answers concise and conversational — 1-3 sentences for simple things, more detail only when explicitly asked for deep research or analysis.
+SYSTEM_PROMPT = """You are Jarvis, a brilliant personal AI assistant and financial analyst. You live on the user's Windows desktop and respond via voice (text-to-speech). Keep conversational answers concise (1-3 sentences), but for financial analysis always go deep and thorough.
 
-Your capabilities:
-- General knowledge, research, explanations, writing, brainstorming
-- Real-time web search and news (IMPORTANT: whenever news involves specific countries, cities, or regions, always call show_news_map with the location names so the user sees them on an interactive map)
-- Weather for any location
-- Stock prices, technical analysis, and market overview
-- Set reminders and timers
-- Open applications and websites
-- Create and read files
-- Run terminal commands (with caution)
-- Time and date
+## General rules
+- Never make up prices, financials, or news. Always use tools for live data.
+- When news involves specific countries/cities, always call show_news_map.
+- Speak to a trader: be precise with numbers, direct with opinions.
 
-Personality: confident, direct, helpful. You are speaking to a trader, so be precise with numbers. When a user asks to "analyse" a stock or market, always call the analyze_stock tool and get_stock_info, then synthesise a clear recommendation. For news, search for it. Never make up current prices or events — always use tools for live data."""
+## Stock & Price Prediction — ALWAYS follow this sequence
+When asked to analyse, predict, or give a price target for any stock:
+1. get_stock_info — current price, 52W range
+2. analyze_stock — technical setup (SMA, RSI, BB, bias)
+3. get_fundamentals — valuation, margins, growth, balance sheet, cash flow, analyst targets
+4. get_earnings_history — recent beats/misses trend
+5. news_search — "{symbol} stock news earnings outlook"
+6. Then synthesise into a FULL PREDICTION REPORT with:
+   - Overall verdict (Strong Buy / Buy / Hold / Sell / Strong Sell)
+   - Confidence %
+   - Bear case price target (12 months)
+   - Base case price target (12 months)
+   - Bull case price target (12 months)
+   - Top 3 catalysts (reasons to go up)
+   - Top 3 risks (reasons to go down)
+   - Key metrics summary
+   - Suggested entry, stop loss, take profit levels
+
+## IPO Analysis — follow this sequence
+When asked about an IPO:
+1. get_ipo_data — search for IPO details
+2. news_search — "{company} IPO analysis valuation"
+3. Synthesise: IPO price, valuation multiples, comparable companies, whether it looks overvalued/undervalued, predicted first-day pop, 90-day outlook.
+
+## Cash Flow / Fundamentals deep-dive
+When asked about revenue, income, cash flow, profits:
+1. get_income_statement
+2. get_cashflow_statement
+3. get_fundamentals
+4. Analyse trends, flag red flags, give verdict."""
 
 TOOLS: list[dict] = [
     {
         "name": "web_search",
-        "description": "Search the web for current information, facts, news, or any topic. Use for anything that needs up-to-date information.",
+        "description": "Search the web for current information, facts, or any topic.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query"},
-                "max_results": {"type": "integer", "description": "Number of results (default 5)", "default": 5},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "news_search",
-        "description": "Search for recent news articles on a topic",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "News topic to search"},
+                "query": {"type": "string"},
                 "max_results": {"type": "integer", "default": 5},
             },
             "required": ["query"],
         },
     },
     {
-        "name": "get_weather",
-        "description": "Get current weather and forecast for a location",
+        "name": "news_search",
+        "description": "Search for recent news articles.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "location": {"type": "string", "description": "City name, e.g. 'London' or 'New York'"},
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "default": 6},
             },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_weather",
+        "description": "Get current weather and forecast for a location.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
             "required": ["location"],
         },
     },
     {
         "name": "get_stock_info",
-        "description": "Get current price, market cap, P/E, 52-week range for a stock or crypto",
+        "description": "Current price, market cap, P/E, 52W range. Step 1 of stock analysis.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "symbol": {"type": "string", "description": "Ticker symbol, e.g. AAPL, TSLA, BTC-USD, ^GSPC"},
-            },
+            "properties": {"symbol": {"type": "string", "description": "Ticker e.g. AAPL, TSLA, BTC-USD"}},
             "required": ["symbol"],
         },
     },
     {
         "name": "analyze_stock",
-        "description": "Technical analysis: SMA20/50/200, RSI, Bollinger Bands, volume trend, and directional bias",
+        "description": "Technical analysis: SMA20/50/200, RSI, Bollinger Bands, volume, bias. Step 2 of stock analysis.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "symbol": {"type": "string", "description": "Ticker symbol"},
-                "period": {
-                    "type": "string",
-                    "description": "Time period: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y",
-                    "default": "1mo",
-                },
+                "symbol": {"type": "string"},
+                "period": {"type": "string", "default": "3mo",
+                           "description": "1d 5d 1mo 3mo 6mo 1y 2y"},
             },
             "required": ["symbol"],
         },
     },
     {
+        "name": "get_fundamentals",
+        "description": "Full fundamentals: valuation ratios, revenue, margins, ROE, balance sheet, cash flow, analyst targets, ownership. Step 3 of stock analysis.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "get_earnings_history",
+        "description": "Recent quarterly earnings: EPS actual vs estimate, surprise %. Step 4 of stock analysis.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "get_income_statement",
+        "description": "Annual income statement: revenue, gross profit, operating income, net income trends.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "get_cashflow_statement",
+        "description": "Annual cash flow statement: operating CF, capex, free cash flow, financing activities.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "get_ipo_data",
+        "description": "Search for IPO details: price, date, valuation, underwriter, comparable companies.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"company": {"type": "string", "description": "Company name"}},
+            "required": ["company"],
+        },
+    },
+    {
         "name": "get_market_overview",
-        "description": "Get a snapshot of major indices: S&P 500, NASDAQ, Dow Jones, VIX, Gold, Oil, BTC",
+        "description": "Snapshot of S&P 500, NASDAQ, Dow, VIX, Gold, Oil, BTC.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "set_reminder",
-        "description": "Set a reminder that fires after N minutes with a spoken alert",
+        "description": "Set a spoken reminder after N minutes.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "message": {"type": "string", "description": "What to remind the user about"},
-                "minutes": {"type": "integer", "description": "Minutes from now"},
+                "message": {"type": "string"},
+                "minutes": {"type": "integer"},
             },
             "required": ["message", "minutes"],
         },
     },
     {
         "name": "list_reminders",
-        "description": "List all pending reminders",
+        "description": "List pending reminders.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_time",
-        "description": "Get the current time",
+        "description": "Current time.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_date",
-        "description": "Get today's date",
+        "description": "Today's date.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "take_screenshot",
-        "description": "Take a screenshot of the screen",
+        "description": "Screenshot of the screen.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "filename": {"type": "string", "description": "Optional filename"},
-            },
+            "properties": {"filename": {"type": "string"}},
             "required": [],
         },
     },
     {
         "name": "open_application",
-        "description": "Open an application: chrome, firefox, edge, notepad, calculator, spotify, discord, vscode, terminal, word, excel, outlook, paint",
+        "description": "Open an app: chrome, firefox, edge, notepad, calculator, spotify, discord, vscode, terminal, word, excel, outlook.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "app_name": {"type": "string", "description": "Application name"},
-            },
+            "properties": {"app_name": {"type": "string"}},
             "required": ["app_name"],
         },
     },
     {
         "name": "open_website",
-        "description": "Open a URL in the default browser",
+        "description": "Open a URL in the browser.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "URL or domain to open"},
-            },
+            "properties": {"url": {"type": "string"}},
             "required": ["url"],
         },
     },
     {
         "name": "create_file",
-        "description": "Create a file with specified content (text, markdown, code, etc.)",
+        "description": "Create a file with content.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "filename": {"type": "string", "description": "Filename with extension"},
-                "content": {"type": "string", "description": "File content"},
+                "filename": {"type": "string"},
+                "content": {"type": "string"},
             },
             "required": ["filename", "content"],
         },
     },
     {
         "name": "read_file",
-        "description": "Read the contents of a file",
+        "description": "Read a file.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "filename": {"type": "string", "description": "Path to the file"},
-            },
+            "properties": {"filename": {"type": "string"}},
             "required": ["filename"],
         },
     },
     {
         "name": "run_command",
-        "description": "Run a Windows shell command and return output. Use for system info, file operations, etc.",
+        "description": "Run a Windows shell command.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "Shell command to run"},
-            },
+            "properties": {"command": {"type": "string"}},
             "required": ["command"],
         },
     },
     {
         "name": "show_news_map",
-        "description": "Geocode location names from news and open an interactive map in the browser with pins. Call this automatically whenever news or research mentions specific countries, cities, or regions.",
+        "description": "Open an interactive map pinning locations mentioned in news. Call automatically when news mentions countries/cities/regions.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "locations": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of place names (countries, cities, regions) mentioned in the news",
+                    "description": "Place names to pin on map",
                 },
             },
             "required": ["locations"],
@@ -199,23 +250,28 @@ TOOLS: list[dict] = [
 ]
 
 _DISPATCH = {
-    "web_search": lambda a: search.web_search(a["query"], a.get("max_results", 5)),
-    "news_search": lambda a: search.news_search(a["query"], a.get("max_results", 5)),
-    "get_weather": lambda a: weather.get_weather(a["location"]),
-    "get_stock_info": lambda a: stocks.get_stock_info(a["symbol"]),
-    "analyze_stock": lambda a: stocks.analyze_stock(a["symbol"], a.get("period", "1mo")),
-    "get_market_overview": lambda a: stocks.get_market_overview(),
-    "set_reminder": lambda a: reminders.set_reminder(a["message"], a["minutes"]),
-    "list_reminders": lambda a: reminders.list_reminders(),
-    "get_time": lambda a: system.get_time(),
-    "get_date": lambda a: system.get_date(),
-    "take_screenshot": lambda a: system.take_screenshot(a.get("filename")),
-    "open_application": lambda a: system.open_application(a["app_name"]),
-    "open_website": lambda a: system.open_website(a["url"]),
-    "create_file": lambda a: system.create_file(a["filename"], a["content"]),
-    "read_file": lambda a: system.read_file(a["filename"]),
-    "run_command": lambda a: system.run_command(a["command"]),
-    "show_news_map": lambda a: maps.show_news_map(a["locations"]),
+    "web_search":           lambda a: search.web_search(a["query"], a.get("max_results", 5)),
+    "news_search":          lambda a: search.news_search(a["query"], a.get("max_results", 6)),
+    "get_weather":          lambda a: weather.get_weather(a["location"]),
+    "get_stock_info":       lambda a: stocks.get_stock_info(a["symbol"]),
+    "analyze_stock":        lambda a: stocks.analyze_stock(a["symbol"], a.get("period", "3mo")),
+    "get_fundamentals":     lambda a: fundamentals.get_fundamentals(a["symbol"]),
+    "get_earnings_history": lambda a: fundamentals.get_earnings_history(a["symbol"]),
+    "get_income_statement": lambda a: fundamentals.get_income_statement(a["symbol"]),
+    "get_cashflow_statement":lambda a: fundamentals.get_cashflow_statement(a["symbol"]),
+    "get_ipo_data":         lambda a: fundamentals.get_ipo_data(a["company"]),
+    "get_market_overview":  lambda a: stocks.get_market_overview(),
+    "set_reminder":         lambda a: reminders.set_reminder(a["message"], a["minutes"]),
+    "list_reminders":       lambda a: reminders.list_reminders(),
+    "get_time":             lambda a: system.get_time(),
+    "get_date":             lambda a: system.get_date(),
+    "take_screenshot":      lambda a: system.take_screenshot(a.get("filename")),
+    "open_application":     lambda a: system.open_application(a["app_name"]),
+    "open_website":         lambda a: system.open_website(a["url"]),
+    "create_file":          lambda a: system.create_file(a["filename"], a["content"]),
+    "read_file":            lambda a: system.read_file(a["filename"]),
+    "run_command":          lambda a: system.run_command(a["command"]),
+    "show_news_map":        lambda a: maps.show_news_map(a["locations"]),
 }
 
 _SYSTEM_BLOCK = [
@@ -242,7 +298,7 @@ class JarvisAssistant:
         while True:
             response = self.client.messages.create(
                 model=MODEL,
-                max_tokens=1024,
+                max_tokens=2048,
                 system=_SYSTEM_BLOCK,
                 tools=TOOLS,
                 messages=self.messages,
@@ -265,21 +321,17 @@ class JarvisAssistant:
                             result = _DISPATCH[block.name](block.input)
                         except Exception as e:
                             result = f"Tool error: {e}"
-                        tool_results.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": str(result),
-                            }
-                        )
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": str(result),
+                        })
                 self.messages.append({"role": "user", "content": tool_results})
                 continue
 
             return "Sorry, I hit an unexpected state. Please try again."
 
     def _trim(self, max_pairs: int = 25):
-        # Keep at most max_pairs*2 messages to avoid unbounded growth.
-        # Tool use/result messages are included in the count.
         if len(self.messages) > max_pairs * 2:
             self.messages = self.messages[-(max_pairs * 2):]
 
