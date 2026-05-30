@@ -1,6 +1,7 @@
 import anthropic
 from tools import search, weather, stocks, reminders, system, maps, fundamentals
 
+
 MODEL = "claude-opus-4-8"
 
 SYSTEM_PROMPT = """You are Jarvis, a brilliant personal AI assistant and financial analyst. You live on the user's Windows desktop and respond via voice (text-to-speech). Keep conversational answers concise (1-3 sentences), but for financial analysis always go deep and thorough.
@@ -10,23 +11,48 @@ SYSTEM_PROMPT = """You are Jarvis, a brilliant personal AI assistant and financi
 - When news involves specific countries/cities, always call show_news_map.
 - Speak to a trader: be precise with numbers, direct with opinions.
 
-## Stock & Price Prediction — ALWAYS follow this sequence
-When asked to analyse, predict, or give a price target for any stock:
-1. get_stock_info — current price, 52W range
-2. analyze_stock — technical setup (SMA, RSI, BB, bias)
-3. get_fundamentals — valuation, margins, growth, balance sheet, cash flow, analyst targets
-4. get_earnings_history — recent beats/misses trend
-5. news_search — "{symbol} stock news earnings outlook"
-6. Then synthesise into a FULL PREDICTION REPORT with:
-   - Overall verdict (Strong Buy / Buy / Hold / Sell / Strong Sell)
-   - Confidence %
-   - Bear case price target (12 months)
-   - Base case price target (12 months)
-   - Bull case price target (12 months)
-   - Top 3 catalysts (reasons to go up)
-   - Top 3 risks (reasons to go down)
-   - Key metrics summary
-   - Suggested entry, stop loss, take profit levels
+## Stock & Price Prediction — ALWAYS follow this full sequence
+When asked to analyse, predict, or give price targets for any stock:
+1. get_stock_info            — current price, 52W range, market cap
+2. get_multi_timeframe_analysis — technicals across all 6 horizons at once
+3. get_fundamentals          — full valuation, margins, growth, balance sheet, cash flow, analyst targets
+4. get_earnings_history      — EPS beat/miss trend
+5. news_search               — "{symbol} stock forecast outlook earnings"
+6. Then output a COMPLETE PREDICTION REPORT in this exact format:
+
+═══════════════════════════════════════════════════
+ PRICE PREDICTION: {NAME} ({SYMBOL}) — ${current}
+═══════════════════════════════════════════════════
+
+TIMEFRAME   │ BEAR      │ BASE      │ BULL      │ CONFIDENCE │ SIGNAL
+────────────┼───────────┼───────────┼───────────┼────────────┼──────────────
+1 Day       │ $xxx      │ $xxx      │ $xxx      │  xx%       │ BUY/SELL/HOLD
+1 Week      │ $xxx      │ $xxx      │ $xxx      │  xx%       │ ...
+1 Month     │ $xxx      │ $xxx      │ $xxx      │  xx%       │ ...
+3 Months    │ $xxx      │ $xxx      │ $xxx      │  xx%       │ ...
+6 Months    │ $xxx      │ $xxx      │ $xxx      │  xx%       │ ...
+1 Year      │ $xxx      │ $xxx      │ $xxx      │  xx%       │ ...
+
+OVERALL VERDICT: [Strong Buy / Buy / Hold / Sell / Strong Sell]
+
+📈 TOP CATALYSTS (why it goes up):
+  1. ...
+  2. ...
+  3. ...
+
+📉 TOP RISKS (why it goes down):
+  1. ...
+  2. ...
+  3. ...
+
+🎯 TRADE SETUP:
+  Entry zone:   $xxx – $xxx
+  Stop loss:    $xxx  (-x%)
+  TP1:          $xxx  (+x%)
+  TP2:          $xxx  (+x%)
+  TP3 (1yr):    $xxx  (+x%)
+
+KEY METRICS: P/E xx | Rev growth xx% | FCF $xB | RSI xx | Analyst target $xxx
 
 ## IPO Analysis — follow this sequence
 When asked about an IPO:
@@ -86,7 +112,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "analyze_stock",
-        "description": "Technical analysis: SMA20/50/200, RSI, Bollinger Bands, volume, bias. Step 2 of stock analysis.",
+        "description": "Technical analysis for a single period: SMA, RSI, MACD, BB, ATR, Stochastic.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -94,6 +120,15 @@ TOOLS: list[dict] = [
                 "period": {"type": "string", "default": "3mo",
                            "description": "1d 5d 1mo 3mo 6mo 1y 2y"},
             },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "get_multi_timeframe_analysis",
+        "description": "Run technical analysis across ALL 6 timeframes at once (1D/1W/1M/3M/6M/1Y). Use this as step 2 for any price prediction request — it replaces calling analyze_stock multiple times.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
             "required": ["symbol"],
         },
     },
@@ -254,7 +289,8 @@ _DISPATCH = {
     "news_search":          lambda a: search.news_search(a["query"], a.get("max_results", 6)),
     "get_weather":          lambda a: weather.get_weather(a["location"]),
     "get_stock_info":       lambda a: stocks.get_stock_info(a["symbol"]),
-    "analyze_stock":        lambda a: stocks.analyze_stock(a["symbol"], a.get("period", "3mo")),
+    "analyze_stock":              lambda a: stocks.analyze_stock(a["symbol"], a.get("period", "3mo")),
+    "get_multi_timeframe_analysis": lambda a: stocks.get_multi_timeframe_analysis(a["symbol"]),
     "get_fundamentals":     lambda a: fundamentals.get_fundamentals(a["symbol"]),
     "get_earnings_history": lambda a: fundamentals.get_earnings_history(a["symbol"]),
     "get_income_statement": lambda a: fundamentals.get_income_statement(a["symbol"]),
