@@ -1,5 +1,5 @@
 import anthropic
-from tools import search, weather, stocks, reminders, system
+from tools import search, weather, stocks, reminders, system, maps
 
 MODEL = "claude-opus-4-8"
 
@@ -7,7 +7,7 @@ SYSTEM_PROMPT = """You are Jarvis, a brilliant personal AI assistant. You live o
 
 Your capabilities:
 - General knowledge, research, explanations, writing, brainstorming
-- Real-time web search and news
+- Real-time web search and news (IMPORTANT: whenever news involves specific countries, cities, or regions, always call show_news_map with the location names so the user sees them on an interactive map)
 - Weather for any location
 - Stock prices, technical analysis, and market overview
 - Set reminders and timers
@@ -179,6 +179,21 @@ TOOLS: list[dict] = [
             },
             "required": ["command"],
         },
+    },
+    {
+        "name": "show_news_map",
+        "description": "Geocode location names from news and open an interactive map in the browser with pins. Call this automatically whenever news or research mentions specific countries, cities, or regions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "locations": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of place names (countries, cities, regions) mentioned in the news",
+                },
+            },
+            "required": ["locations"],
+        },
         "cache_control": {"type": "ephemeral"},
     },
 ]
@@ -200,6 +215,7 @@ _DISPATCH = {
     "create_file": lambda a: system.create_file(a["filename"], a["content"]),
     "read_file": lambda a: system.read_file(a["filename"]),
     "run_command": lambda a: system.run_command(a["command"]),
+    "show_news_map": lambda a: maps.show_news_map(a["locations"]),
 }
 
 _SYSTEM_BLOCK = [
