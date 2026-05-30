@@ -1,5 +1,5 @@
 import anthropic
-from tools import search, weather, stocks, reminders, system, maps, fundamentals, covariance
+from tools import search, weather, stocks, reminders, system, maps, fundamentals, covariance, stock_classifier
 
 
 MODEL = "claude-opus-4-8"
@@ -53,6 +53,13 @@ OVERALL VERDICT: [Strong Buy / Buy / Hold / Sell / Strong Sell]
   TP3 (1yr):    $xxx  (+x%)
 
 KEY METRICS: P/E xx | Rev growth xx% | FCF $xB | RSI xx | Analyst target $xxx
+
+## Stock Classification & Picking (Beta + Covariance)
+When asked to classify a stock, find stocks, pick stocks, or recommend stocks by profile:
+- Single stock → classify_stock
+- "Find me aggressive/defensive/uncorrelated/leader stocks" → screen_stocks
+- "Pick me growth/safe/momentum stocks" → smart_pick
+- After returning results, summarise the top 3 picks from each category with a one-line reason.
 
 ## Covariance / Correlation / Diversification
 When asked about covariance, correlation, beta, diversification, hedging, or how a stock relates to the market:
@@ -172,6 +179,76 @@ TOOLS: list[dict] = [
             "type": "object",
             "properties": {"symbol": {"type": "string"}},
             "required": ["symbol"],
+        },
+    },
+    {
+        "name": "classify_stock",
+        "description": (
+            "Classify a single stock using Beta=Cov(stock,market)/Var(market) and correlation into: "
+            "Aggressive Growth Stock | Market Leader | Market Follower | Defensive Stock | Uncorrelated Opportunity. "
+            "Returns beta, covariance, correlation, annual return, Sharpe ratio, and plain-English explanation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "screen_stocks",
+        "description": (
+            "Screen 150+ stocks from a built-in universe using Beta + Covariance classification. "
+            "Returns ranked picks for any or all categories: "
+            "Aggressive Growth Stock / Market Leader / Market Follower / Defensive Stock / Uncorrelated Opportunity. "
+            "Use when user asks to 'pick stocks', 'find me stocks', 'show me aggressive/defensive stocks', etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Filter by category or 'all'. Options: 'Aggressive Growth Stock', 'Market Leader', 'Market Follower', 'Defensive Stock', 'Uncorrelated Opportunity', 'all'",
+                    "default": "all",
+                },
+                "sector": {
+                    "type": "string",
+                    "description": "Filter by sector or 'all'. Options: Technology, Healthcare, Financials, Energy, Industrials, Utilities, etc.",
+                    "default": "all",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Number of top stocks to return per category (default 8)",
+                    "default": 8,
+                },
+                "period": {
+                    "type": "string",
+                    "description": "Lookback period: '3mo', '6mo', '1y', '2y'",
+                    "default": "1y",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "smart_pick",
+        "description": (
+            "Pick stocks based on an investor goal using Beta+Covariance classification. "
+            "Goals: 'growth' (aggressive+leaders), 'safe'/'defensive', 'diversify' (uncorrelated), "
+            "'momentum' (leaders+aggressive), 'hedge'. "
+            "Use when user says 'pick me growth stocks', 'what should I buy', 'safe stocks for me', etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "description": "Investor goal: growth | safe | defensive | diversify | income | momentum | hedge",
+                    "default": "growth",
+                },
+                "sector": {"type": "string", "default": "all"},
+                "top_n":  {"type": "integer", "default": 5},
+            },
+            "required": ["goal"],
         },
     },
     {
@@ -319,6 +396,12 @@ _DISPATCH = {
     "get_earnings_history": lambda a: fundamentals.get_earnings_history(a["symbol"]),
     "get_income_statement": lambda a: fundamentals.get_income_statement(a["symbol"]),
     "get_cashflow_statement":lambda a: fundamentals.get_cashflow_statement(a["symbol"]),
+    "classify_stock":          lambda a: stock_classifier.classify_single_stock(a["symbol"]),
+    "screen_stocks":           lambda a: stock_classifier.screen_stocks(
+                                    a.get("category", "all"), a.get("sector", "all"),
+                                    a.get("top_n", 8), a.get("period", "1y")),
+    "smart_pick":              lambda a: stock_classifier.smart_pick(
+                                    a.get("goal", "growth"), a.get("sector", "all"), a.get("top_n", 5)),
     "get_covariance_analysis": lambda a: covariance.get_covariance_analysis(a["symbol"]),
     "get_ipo_data":            lambda a: fundamentals.get_ipo_data(a["company"]),
     "get_market_overview":  lambda a: stocks.get_market_overview(),
