@@ -64,13 +64,16 @@ def market_status():
 #  CONFIGURATION  ← edit here
 # ================================================================
 
-MARKET   = "^GSPC"     # Benchmark (S&P 500)
-PERIOD   = "2y"        # Data lookback
-RF_RATE  = 0.05        # Annual risk-free rate
-TOP_N    = 10          # Stocks per category
-WORKERS  = 16          # Parallel threads
+MARKET          = "^GSPC"  # Benchmark (S&P 500)
+PERIOD          = "2y"     # Data lookback
+RF_RATE         = 0.05     # Annual risk-free rate
+TOP_N           = 10       # Stocks per category to display
+WORKERS         = 16       # Parallel analysis threads
+MAX_UNIVERSE    = 1500     # Cap universe size (sorted by market cap desc)
+BATCH_SIZE      = 250      # Tickers per yfinance download call
+MIN_MKTCAP_M    = 300      # Skip stocks below this market cap ($ millions)
 # Stocks with < RECENT_IPO_DAYS trading days are flagged as recent IPOs
-RECENT_IPO_DAYS = 420  # ~20 months
+RECENT_IPO_DAYS = 420      # ~20 months
 
 # ================================================================
 #  LIVE UNIVERSE DISCOVERY
@@ -78,51 +81,49 @@ RECENT_IPO_DAYS = 420  # ~20 months
 #  No hardcoded ticker list — the script finds stocks itself.
 # ================================================================
 
+def _parse_mktcap(s) -> float:
+    """Convert NASDAQ screener market-cap string ('$1.23B', '$456.78M') to $ millions."""
+    try:
+        s = str(s).replace("$", "").replace(",", "").strip()
+        if not s or s in ("N/A", "0", "0.00"):
+            return 0.0
+        if s.endswith("T"):  return float(s[:-1]) * 1_000_000
+        if s.endswith("B"):  return float(s[:-1]) * 1_000
+        if s.endswith("M"):  return float(s[:-1])
+        return float(s) / 1e6
+    except Exception:
+        return 0.0
+
+
 def fetch_universe():
     """
-    Pull live stock universe — no ticker names hardcoded anywhere.
+    Discover the stock universe entirely from live data sources.
+    No ticker names are hardcoded — every symbol comes from an API or Wikipedia.
 
-    Sources tried in order (each adds to the pool independently):
-      1. Wikipedia — S&P 500 constituent table
-      2. Wikipedia — NASDAQ 100 constituent table
-      3. Wikipedia — S&P 400 Mid-Cap constituent table
-      4. NASDAQ exchange screener API  (public, no key)
-      5. NYSE exchange screener API    (public, no key)
-      6. SEC EDGAR company tickers     (public, no key)
+    Pipeline:
+      1. NASDAQ exchange screener  (public API, no key needed)
+      2. NYSE  exchange screener   (public API, no key needed)
+      3. Wikipedia S&P 500 / NASDAQ 100 / S&P 400 (fallback if screeners fail)
 
-    Raises RuntimeError only if every source fails.
-    Returns sorted list of unique, clean ticker symbols.
+    Filtering applied before any ticker touches yfinance:
+      • Letters only (A–Z), 1–5 characters  → drops preferred shares (MITT^A),
+        warrants (BIO/B), ETNs (DX^C) and other non-common-stock listings
+      • US-domiciled companies only (screener `country` field)
+      • Market cap ≥ MIN_MKTCAP_M million dollars  → drops micro/nano caps
+        that generate noise and slow the analysis
+
+    Results sorted by market cap descending, capped at MAX_UNIVERSE.
+    Returns: list[str] of clean ticker symbols.
     """
-    tickers = set()
-    sources = []
-    hdrs    = {"User-Agent": "Mozilla/5.0 (compatible; StockScreener/1.0)"}
+    hdrs        = {"User-Agent": "Mozilla/5.0 (compatible; StockScreener/1.0)"}
+    meta        = {}   # sym → mktcap_M
+    sources     = []
 
-    def _clean(sym):
-        return str(sym).strip().replace(".", "-").upper()
+    def _valid(sym):
+        s = str(sym).strip().upper()
+        return s.isalpha() and 1 <= len(s) <= 5
 
-    def _add_wiki(url, min_rows, label):
-        try:
-            tables = pd.read_html(url)
-            for t in tables:
-                col = next((c for c in t.columns if c in ("Symbol", "Ticker")), None)
-                if col and len(t) >= min_rows:
-                    syms = [_clean(s) for s in t[col].dropna() if str(s).strip()]
-                    tickers.update(syms)
-                    sources.append(f"{label} ({len(syms)})")
-                    return
-        except Exception as e:
-            print(f"  ⚠ {label} Wikipedia fetch failed: {e}")
-
-    # ── 1. S&P 500 ────────────────────────────────────────────────
-    _add_wiki("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", 490, "S&P 500")
-
-    # ── 2. NASDAQ 100 ─────────────────────────────────────────────
-    _add_wiki("https://en.wikipedia.org/wiki/Nasdaq-100", 90, "NASDAQ 100")
-
-    # ── 3. S&P 400 Mid-Cap ────────────────────────────────────────
-    _add_wiki("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", 380, "S&P 400")
-
-    # ── 4 & 5. NASDAQ / NYSE exchange screener (public API) ───────
+    # ── 1 & 2. NASDAQ / NYSE screener ────────────────────────────
     for exchange in ("nasdaq", "nyse"):
         try:
             url  = (f"https://api.nasdaq.com/api/screener/stocks"
@@ -130,36 +131,96 @@ def fetch_universe():
             resp = requests.get(url, headers=hdrs, timeout=15)
             resp.raise_for_status()
             rows = resp.json().get("data", {}).get("rows") or []
-            syms = [_clean(r["symbol"]) for r in rows if r.get("symbol")]
-            tickers.update(syms)
-            sources.append(f"{exchange.upper()} screener ({len(syms)})")
+
+            added = 0
+            for row in rows:
+                sym = str(row.get("symbol", "")).strip().upper()
+                if not _valid(sym):
+                    continue
+                country = str(row.get("country", "")).lower()
+                if country and "united states" not in country:
+                    continue
+                mc = _parse_mktcap(row.get("marketCap", ""))
+                if mc < MIN_MKTCAP_M:
+                    continue
+                if sym not in meta or mc > meta[sym]:
+                    meta[sym] = mc
+                added += 1
+            sources.append(f"{exchange.upper()} ({added} valid)")
         except Exception as e:
             print(f"  ⚠ {exchange.upper()} screener failed: {e}")
 
-    # ── 6. SEC EDGAR — all registered US public companies ─────────
-    if len(tickers) < 100:
-        try:
-            url  = "https://www.sec.gov/files/company_tickers.json"
-            resp = requests.get(url, headers=hdrs, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-            syms = [_clean(v["ticker"]) for v in data.values() if v.get("ticker")]
-            # Keep only short tickers (≤5 chars) — filters out options/warrants
-            syms = [s for s in syms if 1 <= len(s) <= 5 and s.isalpha()]
-            tickers.update(syms)
-            sources.append(f"SEC EDGAR ({len(syms)})")
-        except Exception as e:
-            print(f"  ⚠ SEC EDGAR fetch failed: {e}")
+    # ── 3. Wikipedia fallback (used when screeners fail) ──────────
+    if len(meta) < 200:
+        for url, label, min_rows in [
+            ("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "S&P 500",   490),
+            ("https://en.wikipedia.org/wiki/Nasdaq-100",                   "NASDAQ 100", 90),
+            ("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", "S&P 400",   380),
+        ]:
+            try:
+                tables = pd.read_html(url)
+                for t in tables:
+                    col = next((c for c in t.columns if c in ("Symbol", "Ticker")), None)
+                    if col and len(t) >= min_rows:
+                        for sym in t[col].dropna():
+                            s = str(sym).strip().upper()
+                            if _valid(s) and s not in meta:
+                                meta[s] = 0.0   # no market cap data from Wikipedia
+                        sources.append(label)
+                        break
+            except Exception as e:
+                print(f"  ⚠ {label} Wikipedia fetch failed: {e}")
 
-    if not tickers:
+    if not meta:
         raise RuntimeError(
             "All universe sources failed. Check your internet connection and try again."
         )
 
-    result = sorted(tickers)
+    # Sort by market cap descending, cap at MAX_UNIVERSE
+    ranked = sorted(meta.items(), key=lambda x: x[1], reverse=True)
+    result = [sym for sym, _ in ranked[:MAX_UNIVERSE]]
+
     print(f"  Sources: {' | '.join(sources)}")
-    print(f"  Total unique tickers: {len(result)}")
+    print(f"  Valid US stocks found: {len(meta)}  →  keeping top {len(result)} by market cap")
     return result
+
+
+def bulk_download(syms, period, batch_size=BATCH_SIZE):
+    """
+    Download Close prices for all symbols in batches.
+    yfinance has a URL length limit — sending thousands of tickers at once
+    causes 'unexpected character' errors. Batching fixes this.
+    Returns a single DataFrame with one column per symbol.
+    """
+    frames  = []
+    batches = [syms[i:i+batch_size] for i in range(0, len(syms), batch_size)]
+    total_b = len(batches)
+
+    for i, batch in enumerate(batches, 1):
+        try:
+            raw = yf.download(batch, period=period, auto_adjust=True, progress=False)
+            # yfinance ≥0.2 returns MultiIndex columns; extract Close level
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw = raw["Close"]
+            elif "Close" in raw.columns:
+                raw = raw[["Close"]]
+            if isinstance(raw, pd.Series):
+                raw = raw.to_frame(batch[0])
+            frames.append(raw)
+        except Exception as e:
+            pass   # failed batches are silently skipped; stocks just won't appear
+        if i % 3 == 0 or i == total_b:
+            pct = i / total_b * 100
+            bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
+            print(f"  [{bar}] {pct:.0f}%  batch {i}/{total_b}", end="\r")
+
+    print()
+    if not frames:
+        raise RuntimeError("All download batches failed. Check internet connection.")
+
+    combined = pd.concat(frames, axis=1)
+    # Drop duplicate columns (can happen if a ticker appears in both exchanges)
+    return combined.loc[:, ~combined.columns.duplicated()]
 
 
 def fetch_upcoming_ipos():
@@ -624,16 +685,23 @@ UPCOMING_IPOS = fetch_upcoming_ipos()
 #  STEP 1 — DOWNLOAD
 # ================================================================
 
-print(f"\n  [1/4] Downloading bulk price data for {len(UNIVERSE)} tickers…")
-all_tickers = UNIVERSE + [MARKET]
-bulk = yf.download(all_tickers, period=PERIOD, auto_adjust=True, progress=False)["Close"]
-if isinstance(bulk, pd.Series):
-    bulk = bulk.to_frame()
+print(f"\n  [1/4] Downloading price data — {len(UNIVERSE)} stocks in batches of {BATCH_SIZE}…")
+
+# Download market benchmark first (always needed)
+mkt_raw = yf.download(MARKET, period=PERIOD, auto_adjust=True, progress=False)
+if isinstance(mkt_raw.columns, pd.MultiIndex):
+    mkt_raw = mkt_raw["Close"]
+mkt_series = mkt_raw.squeeze() if isinstance(mkt_raw, pd.DataFrame) else mkt_raw
+
+# Download all stocks in batches
+bulk = bulk_download(UNIVERSE, PERIOD, BATCH_SIZE)
+bulk[MARKET] = mkt_series   # inject benchmark column
 
 mkt_ret    = bulk[MARKET].pct_change().dropna()
 DATA_START = bulk.index[0].strftime("%d %b %Y")
 DATA_END   = bulk.index[-1].strftime("%d %b %Y")
-print(f"  ✓ {bulk.shape[1]-1} tickers loaded  |  {len(bulk)} trading days")
+loaded     = bulk.shape[1] - 1   # exclude benchmark column
+print(f"  ✓ {loaded} tickers loaded  |  {len(bulk)} trading days")
 print(f"  ✓ Data range: {DATA_START}  →  {DATA_END}")
 
 # ================================================================
