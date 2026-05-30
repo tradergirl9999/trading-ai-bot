@@ -1,0 +1,12 @@
+anthropic>=0.40.0
+SpeechRecognition>=3.10.0
+pyttsx3>=2.90
+PyAudio>=0.2.14
+duckduckgo-search>=6.0.0
+yfinance>=0.2.40
+requests>=2.31.0
+pyautogui>=0.9.54
+python-dotenv>=1.0.0
+pandas>=2.0.0
+folium>=0.16.0
+geopy>=2.4.0
