@@ -10,10 +10,13 @@
 #    Defensive         | Uncorrelated
 #
 #  Predictions: 1 Day | 1 Week | 1 Month | 3M | 6M | 1 Year
+#
+#  Universe is fetched LIVE from Wikipedia (S&P 500 + NASDAQ 100).
+#  No stock names are hardcoded — the script discovers everything itself.
 # ================================================================
 
 # ── Install (run this line first if packages are missing) ────────
-# !pip install yfinance pandas numpy matplotlib pytz -q
+# !pip install yfinance pandas numpy matplotlib pytz requests -q
 
 import yfinance as yf
 import pandas as pd
@@ -25,6 +28,7 @@ import warnings
 import time
 import datetime
 import pytz
+import requests
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.max_columns", None)
@@ -47,97 +51,170 @@ def market_status():
     et      = datetime.datetime.now(TZ_ET)
     weekday = et.weekday()
     hour    = et.hour + et.minute / 60
-    if weekday >= 5:                return "CLOSED — Weekend"
-    if hour < 4.0:                  return "CLOSED — Overnight"
+    if weekday >= 5:    return "CLOSED — Weekend"
+    if hour < 4.0:      return "CLOSED — Overnight"
     if hour < 9.5:
         mins = int((9.5 - hour) * 60)
         return f"PRE-MARKET  (regular open in {mins} min)"
-    if hour < 16.0:                 return "OPEN — Regular Hours"
-    if hour < 20.0:                 return "AFTER-HOURS"
+    if hour < 16.0:     return "OPEN — Regular Hours"
+    if hour < 20.0:     return "AFTER-HOURS"
     return "CLOSED — Overnight"
 
 # ================================================================
 #  CONFIGURATION  ← edit here
 # ================================================================
 
-MARKET   = "^GSPC"     # Benchmark
+MARKET   = "^GSPC"     # Benchmark (S&P 500)
 PERIOD   = "2y"        # Data lookback
 RF_RATE  = 0.05        # Annual risk-free rate
 TOP_N    = 10          # Stocks per category
-WORKERS  = 12          # Parallel threads
+WORKERS  = 16          # Parallel threads
+# Stocks with < RECENT_IPO_DAYS trading days are flagged as recent IPOs
+RECENT_IPO_DAYS = 420  # ~20 months
 
-STOCKS = [
-    # Technology
-    "AAPL","MSFT","NVDA","GOOGL","META","AMD","INTC","CRM","ORCL","ADBE",
-    "QCOM","TXN","NOW","SNOW","PLTR","PANW","AMAT","MU","LRCX","KLAC",
-    "SMCI","DELL","HPE","CSCO","AVGO","MRVL","NXPI","ON",
-    # Healthcare
-    "JNJ","UNH","LLY","ABBV","PFE","MRK","TMO","ABT","DHR","AMGN",
-    "GILD","ISRG","CVS","BMY","VRTX","REGN","ZTS","SYK","BSX","ELV",
-    "HCA","CI","CNC","DXCM","IDXX","IQV","ALGN","HOLX","PODD",
-    # Financials
-    "JPM","BAC","WFC","GS","MS","BLK","C","AXP","SPGI","CB",
-    "AON","MMC","PGR","TRV","USB","COF","SCHW","ICE","CME","MCO",
-    "V","MA","PYPL","SQ","SOFI","NU","HOOD","AFRM","UPST",
-    # Consumer Discretionary
-    "AMZN","TSLA","HD","MCD","NKE","SBUX","TGT","COST","LOW","BKNG",
-    "MAR","HLT","GM","F","ABNB","EBAY","ETSY","RCL","CCL","LVS",
-    # Consumer Staples
-    "PG","KO","PEP","WMT","MDLZ","CL","KMB","GIS","MO","PM","STZ","CLX",
-    # Energy
-    "XOM","CVX","COP","EOG","SLB","PSX","VLO","MPC","OXY","HAL",
-    "BKR","DVN","APA","MRO","HES",
-    # Industrials
-    "CAT","BA","HON","UNP","LMT","RTX","GE","DE","MMM","UPS",
-    "FDX","EMR","ETN","PH","ITW","CSX","NSC","WM","ROK","AME",
-    # Materials
-    "LIN","APD","ECL","SHW","FCX","NEM","DOW","DD","NUE","CF",
-    # Utilities
-    "NEE","DUK","SO","D","AEP","EXC","XEL","WEC","ES","ETR",
-    # Real Estate
-    "AMT","PLD","CCI","EQIX","SPG","PSA","EQR","AVB","O","WY",
-    # Communication
-    "NFLX","DIS","CMCSA","T","VZ","CHTR","TMUS","WBD",
-    # High Beta / Crypto-adjacent
-    "COIN","MSTR","MARA","RIOT","CLSK","IREN",
-    # Recent IPOs
-    "RDDT","ARM","CART","KVYO","CRWV","ASTS","RKLB","ACHR","JOBY",
-]
+# ================================================================
+#  LIVE UNIVERSE DISCOVERY
+#  Fetches S&P 500 + NASDAQ 100 from Wikipedia.
+#  No hardcoded ticker list — the script finds stocks itself.
+# ================================================================
 
-UPCOMING_IPOS = [
-    {"name":"Klarna",        "ticker":"KLAR",  "sector":"Fintech",
-     "valuation":"~$15B",   "expected":"2026",
-     "why":"BNPL leader, profitable, strong EU market share, expanding US. "
-           "High growth, IPO multiple likely 8-12x revenue."},
-    {"name":"Chime",         "ticker":"TBD",   "sector":"Neobank",
-     "valuation":"~$8B",    "expected":"2026",
-     "why":"22M+ US users, no-fee banking model. Delayed multiple times. "
-           "Watch for profitability metrics before committing."},
-    {"name":"StubHub",       "ticker":"TBD",   "sector":"Ticketing",
-     "valuation":"~$16B",   "expected":"2026",
-     "why":"Live events super-cycle post-COVID. Revenue tied to Taylor Swift-level demand. "
-           "High cash flow, brand recognition."},
-    {"name":"Cerebras",      "ticker":"CBRS",  "sector":"AI Chips",
-     "valuation":"~$4B",    "expected":"2026",
-     "why":"Wafer-Scale Engine — single chip for entire AI model. "
-           "If adopted at scale, competes directly with NVIDIA. Extreme risk, extreme upside."},
-    {"name":"eToro",         "ticker":"ETOR",  "sector":"Fintech",
-     "valuation":"~$3.5B",  "expected":"2026",
-     "why":"Social trading platform, profitable in 2023. Crypto-exposed revenue stream. "
-           "Watch crypto cycle correlation."},
-    {"name":"Medline",       "ticker":"MDL",   "sector":"Healthcare",
-     "valuation":"~$30B",   "expected":"2026",
-     "why":"Largest US private medical supply company. Defensive, recession-resistant. "
-           "Stable revenue, strong pricing power."},
-    {"name":"Panera Brands", "ticker":"PNRA",  "sector":"Restaurants",
-     "valuation":"~$10B",   "expected":"2026",
-     "why":"Second re-IPO attempt after going private. Recognisable brand, "
-           "heavy debt load — monitor leverage ratios closely."},
-    {"name":"Shein",         "ticker":"TBD",   "sector":"Fast Fashion",
-     "valuation":"~$45B",   "expected":"2026",
-     "why":"Massive global scale in ultra-fast fashion. Regulatory + ESG risk is significant. "
-           "High reward only for risk-tolerant investors."},
-]
+def fetch_universe():
+    """
+    Pull live stock universe from public Wikipedia tables.
+    S&P 500  → https://en.wikipedia.org/wiki/List_of_S%26P_500_companies
+    NASDAQ 100 → https://en.wikipedia.org/wiki/Nasdaq-100
+    Returns sorted list of unique tickers.
+    """
+    tickers = set()
+    sources = []
+    hdrs    = {"User-Agent": "Mozilla/5.0 (compatible; StockScreener/1.0)"}
+
+    # ── S&P 500 ───────────────────────────────────────────────────
+    try:
+        tables = pd.read_html(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            attrs={"id": "constituents"},
+            storage_options={"User-Agent": hdrs["User-Agent"]},
+        )
+        sp = tables[0]["Symbol"].str.replace(".", "-", regex=False).dropna().tolist()
+        tickers.update(sp)
+        sources.append(f"S&P 500 ({len(sp)})")
+    except Exception as e:
+        try:
+            # fallback: no attrs filter
+            tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+            for t in tables:
+                if "Symbol" in t.columns and len(t) >= 490:
+                    sp = t["Symbol"].str.replace(".", "-", regex=False).dropna().tolist()
+                    tickers.update(sp)
+                    sources.append(f"S&P 500 ({len(sp)})")
+                    break
+        except Exception as e2:
+            print(f"  ⚠ S&P 500 fetch failed: {e2}")
+
+    # ── NASDAQ 100 ────────────────────────────────────────────────
+    try:
+        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
+        for t in tables:
+            col = next((c for c in t.columns if c in ("Ticker", "Symbol")), None)
+            if col and len(t) >= 90:
+                ndx = t[col].dropna().str.strip().tolist()
+                tickers.update(ndx)
+                sources.append(f"NASDAQ 100 ({len(ndx)})")
+                break
+    except Exception as e:
+        print(f"  ⚠ NASDAQ 100 fetch failed: {e}")
+
+    # ── Hard fallback so script still runs ────────────────────────
+    if len(tickers) < 50:
+        print("  ⚠ Web fetches failed — using minimal 50-stock fallback universe")
+        tickers.update({
+            "AAPL","MSFT","NVDA","GOOGL","AMZN","META","TSLA","AVGO","JPM","V",
+            "JNJ","UNH","XOM","PG","HD","MA","BAC","COST","ABBV","MRK",
+            "CVX","LLY","NFLX","CRM","TMO","ACN","MCD","AMD","INTC","QCOM",
+            "NOW","ADBE","ORCL","CSCO","PYPL","GS","MS","BLK","RTX","CAT",
+            "NEE","DUK","AMT","PLD","GE","DE","HON","UNP","ETN","LMT",
+        })
+        sources.append("fallback-50")
+
+    result = sorted(tickers)
+    print(f"  Sources: {' | '.join(sources)}")
+    print(f"  Total unique tickers: {len(result)}")
+    return result
+
+
+def fetch_upcoming_ipos():
+    """
+    Fetch upcoming IPOs from NASDAQ's public IPO calendar API (no key needed).
+    Tries current month + next 2 months, then falls back to a curated list.
+    Returns list of dicts with: name, ticker, sector, valuation, expected, why.
+    """
+    all_ipos = []
+    hdrs     = {"User-Agent": "Mozilla/5.0 (compatible; StockScreener/1.0)"}
+
+    try:
+        today  = datetime.datetime.now(TZ_ET)
+        months = [
+            (today + datetime.timedelta(days=30 * i)).strftime("%Y-%m")
+            for i in range(3)
+        ]
+        for month in months:
+            url  = f"https://api.nasdaq.com/api/ipo/calendar?date={month}"
+            resp = requests.get(url, headers=hdrs, timeout=10)
+            if resp.status_code != 200:
+                continue
+            data = resp.json().get("data", {})
+
+            for section_key, table_key in [("upcoming", "upcomingTable"), ("priced", "rows")]:
+                section = data.get(section_key, {})
+                rows = section.get(table_key, {})
+                if isinstance(rows, dict):
+                    rows = rows.get("rows", [])
+                for row in (rows or []):
+                    lo     = row.get("priceRangeLow", "?")
+                    hi     = row.get("priceRangeHigh", "?")
+                    shares = row.get("sharesOffered", "N/A")
+                    exch   = row.get("exchange", "N/A")
+                    all_ipos.append({
+                        "name":      row.get("companyName", "Unknown"),
+                        "ticker":    row.get("proposedTickerSymbol", "TBD"),
+                        "sector":    exch,
+                        "valuation": row.get("dollarValueOfSharesOffered", "N/A"),
+                        "expected":  row.get("expectedPriceDate") or row.get("pricedDate", "TBD"),
+                        "why":       (f"Shares offered: {shares}. "
+                                      f"Price range: ${lo}–${hi}. "
+                                      f"Exchange: {exch}."),
+                    })
+
+        if all_ipos:
+            print(f"  Fetched {len(all_ipos)} IPO entries from NASDAQ API")
+            return all_ipos[:15]
+
+    except Exception as e:
+        print(f"  ⚠ NASDAQ IPO API unavailable: {e}")
+
+    # ── Curated fallback ──────────────────────────────────────────
+    print("  Using curated upcoming IPO list (NASDAQ API unavailable)")
+    return [
+        {"name": "Klarna",   "ticker": "KLAR",  "sector": "Fintech",
+         "valuation": "~$15B", "expected": "2026",
+         "why": "BNPL leader, profitable, expanding US market. IPO multiple likely 8-12x revenue."},
+        {"name": "Cerebras", "ticker": "CBRS",  "sector": "AI Chips",
+         "valuation": "~$4B",  "expected": "2026",
+         "why": "Wafer-Scale Engine — single chip per AI model. Direct NVIDIA competitor potential."},
+        {"name": "StubHub",  "ticker": "TBD",   "sector": "Ticketing",
+         "valuation": "~$16B", "expected": "2026",
+         "why": "Live events rebound. High cash flow, recognised brand."},
+        {"name": "eToro",    "ticker": "ETOR",  "sector": "Fintech",
+         "valuation": "~$3.5B","expected": "2026",
+         "why": "Social trading platform. Profitable 2023. Crypto-revenue exposed."},
+        {"name": "Medline",  "ticker": "MDL",   "sector": "Healthcare",
+         "valuation": "~$30B", "expected": "2026",
+         "why": "Largest US private medical supply. Defensive, recession-resistant."},
+        {"name": "Chime",    "ticker": "TBD",   "sector": "Neobank",
+         "valuation": "~$8B",  "expected": "2026",
+         "why": "22M+ US users, no-fee banking. Watch profitability metrics before committing."},
+    ]
 
 # ================================================================
 #  MATH
@@ -179,16 +256,16 @@ def technicals(close, high, low, volume):
     sma50  = float(close.rolling(50).mean().iloc[-1])  if n >= 50  else price
     sma200 = float(close.rolling(200).mean().iloc[-1]) if n >= 200 else price
 
-    ema12  = close.ewm(span=12, adjust=False).mean()
-    ema26  = close.ewm(span=26, adjust=False).mean()
+    ema12     = close.ewm(span=12, adjust=False).mean()
+    ema26     = close.ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
     macd_sig  = macd_line.ewm(span=9, adjust=False).mean()
     macd_h    = float((macd_line - macd_sig).iloc[-1])
 
-    delta  = close.diff()
-    gain   = delta.clip(lower=0).rolling(14).mean()
-    loss   = (-delta.clip(upper=0)).rolling(14).mean()
-    rsi    = float((100 - 100 / (1 + gain / loss.replace(0, np.nan))).iloc[-1])
+    delta = close.diff()
+    gain  = delta.clip(lower=0).rolling(14).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14).mean()
+    rsi   = float((100 - 100 / (1 + gain / loss.replace(0, np.nan))).iloc[-1])
 
     bb_mid = close.rolling(20).mean()
     bb_std = close.rolling(20).std()
@@ -196,8 +273,8 @@ def technicals(close, high, low, volume):
     bb_lo  = float((bb_mid - 2 * bb_std).iloc[-1])
     bb_pct = (price - bb_lo) / (bb_up - bb_lo) if bb_up != bb_lo else 0.5
 
-    tr   = pd.concat([(high-low),(high-close.shift()).abs(),(low-close.shift()).abs()],axis=1).max(axis=1)
-    atr  = float(tr.rolling(14).mean().iloc[-1]) if n >= 14 else float(tr.mean())
+    tr    = pd.concat([(high-low),(high-close.shift()).abs(),(low-close.shift()).abs()],axis=1).max(axis=1)
+    atr   = float(tr.rolling(14).mean().iloc[-1]) if n >= 14 else float(tr.mean())
 
     stoch_k = None
     if n >= 17:
@@ -392,7 +469,7 @@ def build_reasons(t, b_val, r_val, cat, ar, sh, av, pe, fwd_pe, rev_g, margin, r
         elif rg_pct > 10:
             fund_points.append(f"Revenue growing {rg_pct:.0f}% YoY — healthy expansion")
         elif rg_pct > 0:
-            fund_points.append(f"Revenue growing {rg_pct:.0f}% YoY — slow growth, watch for margin expansion to compensate")
+            fund_points.append(f"Revenue growing {rg_pct:.0f}% YoY — slow growth, watch for margin expansion")
         else:
             fund_points.append(f"Revenue declining {rg_pct:.0f}% YoY — turnaround required, higher risk")
 
@@ -408,7 +485,8 @@ def build_reasons(t, b_val, r_val, cat, ar, sh, av, pe, fwd_pe, rev_g, margin, r
             fund_points.append(f"Net margin {mg_pct:.1f}% — currently unprofitable, monitor burn rate")
 
     reasons["FUNDAMENTAL VIEW"] = (
-        " | ".join(fund_points) if fund_points else "Fundamental data not available — use web screener for verification"
+        " | ".join(fund_points) if fund_points
+        else "Fundamental data not available — use web screener for verification"
     )
 
     # ── PERFORMANCE CONTEXT ────────────────────────────────────────
@@ -477,9 +555,11 @@ def analyse(sym, mkt_returns, bulk_prices):
         av_val = ann_vol(s_ret)
         cat    = classify(b_val, r_val)
 
-        t     = technicals(hist["Close"], hist["High"], hist["Low"], hist["Volume"])
-        price = t["price"]
+        t          = technicals(hist["Close"], hist["High"], hist["Low"], hist["Volume"])
+        price      = t["price"]
+        hist_days  = len(hist)
         last_close = hist.index[-1].strftime("%d %b %Y")
+        ipo_date   = hist.index[0].strftime("%d %b %Y")
 
         preds = {
             label: predict(price, t["tech_score"], av_val, days, idx)
@@ -504,6 +584,7 @@ def analyse(sym, mkt_returns, bulk_prices):
             tech=t, preds=preds,
             pe=pe, fwd_pe=fwd_pe, rev_g=rev_g,
             margin=margin, mktcap=mktcap, target=target,
+            hist_days=hist_days, ipo_date=ipo_date,
         )
     except Exception:
         return None
@@ -522,7 +603,7 @@ def rank_df(subset, cat):
     return s.sort_values("_s", ascending=False)
 
 # ================================================================
-#  STEP 1 — DOWNLOAD
+#  STEP 0 — DISCOVER UNIVERSE  ← live fetch, no hardcoded list
 # ================================================================
 
 print("=" * 70)
@@ -530,11 +611,20 @@ print("  STOCK CLASSIFIER + PRICE PREDICTOR")
 print(f"  Date (ET) : {fmt_dt(RUN_ET)}")
 print(f"  Date (UTC): {fmt_dt(RUN_UTC)}")
 print(f"  Market    : {market_status()}")
-print(f"  Universe  : {len(STOCKS)} stocks  |  Period: {PERIOD}  |  Benchmark: S&P 500")
 print("=" * 70)
 
-print("\n  [1/3] Downloading bulk price data…")
-all_tickers = STOCKS + [MARKET]
+print("\n  [0/4] Discovering stock universe from live sources…")
+UNIVERSE = fetch_universe()
+
+print("\n  [0/4] Fetching upcoming IPO calendar…")
+UPCOMING_IPOS = fetch_upcoming_ipos()
+
+# ================================================================
+#  STEP 1 — DOWNLOAD
+# ================================================================
+
+print(f"\n  [1/4] Downloading bulk price data for {len(UNIVERSE)} tickers…")
+all_tickers = UNIVERSE + [MARKET]
 bulk = yf.download(all_tickers, period=PERIOD, auto_adjust=True, progress=False)["Close"]
 if isinstance(bulk, pd.Series):
     bulk = bulk.to_frame()
@@ -542,29 +632,30 @@ if isinstance(bulk, pd.Series):
 mkt_ret    = bulk[MARKET].pct_change().dropna()
 DATA_START = bulk.index[0].strftime("%d %b %Y")
 DATA_END   = bulk.index[-1].strftime("%d %b %Y")
-print(f"  ✓ {bulk.shape[1]-1} tickers  |  {len(bulk)} trading days")
+print(f"  ✓ {bulk.shape[1]-1} tickers loaded  |  {len(bulk)} trading days")
 print(f"  ✓ Data range: {DATA_START}  →  {DATA_END}")
 
 # ================================================================
 #  STEP 2 — PARALLEL ANALYSIS
 # ================================================================
 
-print(f"\n  [2/3] Analysing all stocks in background ({WORKERS} threads)…")
+print(f"\n  [2/4] Analysing all stocks in background ({WORKERS} threads)…")
 t0      = time.time()
 results = []
 done    = 0
+total   = len(UNIVERSE)
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as ex:
-    futures = {ex.submit(analyse, sym, mkt_ret, bulk): sym for sym in STOCKS}
+    futures = {ex.submit(analyse, sym, mkt_ret, bulk): sym for sym in UNIVERSE}
     for fut in concurrent.futures.as_completed(futures):
         done += 1
         res = fut.result()
         if res:
             results.append(res)
-        if done % 15 == 0 or done == len(STOCKS):
-            pct = done / len(STOCKS) * 100
+        if done % 20 == 0 or done == total:
+            pct = done / total * 100
             bar = "█" * int(pct/5) + "░" * (20 - int(pct/5))
-            print(f"  [{bar}] {pct:.0f}%  ({done}/{len(STOCKS)}, {len(results)} valid)", end="\r")
+            print(f"  [{bar}] {pct:.0f}%  ({done}/{total}, {len(results)} valid)", end="\r")
 
 elapsed = time.time() - t0
 print(f"\n  ✓ Done in {elapsed:.1f}s — {len(results)} stocks analysed\n")
@@ -576,7 +667,7 @@ res_map = {r["symbol"]: r for r in results}
 #  STEP 3 — PRINT RESULTS
 # ================================================================
 
-print("[3/3] Results\n")
+print("[3/4] Category results\n")
 
 for cat in CATEGORIES:
     cat_rows = df_all[df_all["category"] == cat]
@@ -596,11 +687,11 @@ for cat in CATEGORIES:
         if not r:
             continue
 
-        # Build reasons with rank score
-        cat_sub   = df_all[df_all["category"] == cat].copy()
-        ranked_sub= rank_df(cat_sub, cat)
-        rank_score= float(ranked_sub[ranked_sub["symbol"] == sym]["_s"].values[0]) if "_s" in ranked_sub.columns else 0.0
-        rdict     = build_reasons(
+        cat_sub    = df_all[df_all["category"] == cat].copy()
+        ranked_sub = rank_df(cat_sub, cat)
+        rank_score = float(ranked_sub[ranked_sub["symbol"] == sym]["_s"].values[0]) \
+                     if "_s" in ranked_sub.columns else 0.0
+        rdict = build_reasons(
             r["tech"], r["beta"], r["corr"], cat,
             r["ann_ret"], r["sharpe"], r["ann_vol"],
             r["pe"], r["fwd_pe"], r["rev_g"], r["margin"], rank_score
@@ -608,8 +699,9 @@ for cat in CATEGORIES:
 
         mc_str  = f"  MCap ${r['mktcap']/1e9:.1f}B" if r["mktcap"] else ""
         tgt_str = f"  Analyst target ${r['target']:.2f}" if r["target"] else ""
+        ipo_tag = "  ⚡ Recent IPO" if r["hist_days"] < RECENT_IPO_DAYS else ""
 
-        print(f"\n  #{pos}  {r['name']} ({sym})  |  ${r['price']:.2f}  |  Last close: {r['last_close']}")
+        print(f"\n  #{pos}  {r['name']} ({sym}){ipo_tag}  |  ${r['price']:.2f}  |  Last close: {r['last_close']}")
         print(f"       Sector: {r['sector']}{mc_str}{tgt_str}")
         print(f"       Beta: {r['beta']:+.3f}  |  Corr: {r['corr']:+.3f}  |  Cov: {r['cov']:.6f}  |  "
               f"Ann Return: {r['ann_ret']:+.1f}%  |  Volatility: {r['ann_vol']:.1f}%  |  Sharpe: {r['sharpe']:.2f}")
@@ -619,10 +711,10 @@ for cat in CATEGORIES:
         print(f"       {'TIMEFRAME':<12} {'BEAR':>10} {'BASE':>10} {'BULL':>10} {'CONF':>6} {'SIGNAL'}")
         print(f"       {'─'*12} {'─'*10} {'─'*10} {'─'*10} {'─'*6} {'─'*13}")
         for label, _ in TIMEFRAMES:
-            p = r["preds"][label]
-            b_pct = (p["bear"]/r["price"]-1)*100
-            bs_pct= (p["base"]/r["price"]-1)*100
-            bl_pct= (p["bull"]/r["price"]-1)*100
+            p      = r["preds"][label]
+            b_pct  = (p["bear"]/r["price"]-1)*100
+            bs_pct = (p["base"]/r["price"]-1)*100
+            bl_pct = (p["bull"]/r["price"]-1)*100
             print(f"       {label:<12} "
                   f"${p['bear']:>8.2f} ({b_pct:+.1f}%)  "
                   f"${p['base']:>8.2f} ({bs_pct:+.1f}%)  "
@@ -633,7 +725,6 @@ for cat in CATEGORIES:
         print()
         for section, text in rdict.items():
             print(f"       [{section}]")
-            # Word-wrap at 65 chars
             words = text.split()
             line, lines = "", []
             for w in words:
@@ -649,15 +740,43 @@ for cat in CATEGORIES:
             print()
 
 # ================================================================
-#  UPCOMING IPOs
+#  RECENTLY IPO'd STOCKS  (auto-detected: < ~20 months of history)
 # ================================================================
 
-print("=" * 70)
+recent_ipos = df_all[df_all["hist_days"] < RECENT_IPO_DAYS].sort_values("ann_ret", ascending=False)
+
+if not recent_ipos.empty:
+    print("=" * 70)
+    print("  ⚡  RECENTLY IPO'd STOCKS IN UNIVERSE  (auto-detected)")
+    print(f"     Stocks with < {RECENT_IPO_DAYS} trading days of history  |  "
+          f"First data point used as proxy IPO date")
+    print(f"     {len(recent_ipos)} found  |  As of {DATA_END}")
+    print("=" * 70)
+    for _, row in recent_ipos.iterrows():
+        sym = row["symbol"]
+        r   = res_map.get(sym)
+        if not r:
+            continue
+        p1y = r["preds"]["1 Year"]
+        mc  = f"  MCap ${r['mktcap']/1e9:.1f}B" if r.get("mktcap") else ""
+        print(f"\n  ▸  {r['name']} ({sym})  |  ${r['price']:.2f}{mc}")
+        print(f"     Sector: {r['sector']}  |  Listed ~{r['ipo_date']}  |  "
+              f"{r['hist_days']} trading days of data")
+        print(f"     Category: {r['category']}  |  "
+              f"Beta: {r['beta']:+.3f}  |  1Y Return: {r['ann_ret']:+.1f}%  |  Sharpe: {r['sharpe']:.2f}")
+        print(f"     1Y Prediction — Bear: ${p1y['bear']:.2f}  Base: ${p1y['base']:.2f}  "
+              f"Bull: ${p1y['bull']:.2f}  →  {p1y['signal']}")
+
+# ================================================================
+#  UPCOMING IPOs  (from NASDAQ API or curated fallback)
+# ================================================================
+
+print(f"\n{'=' * 70}")
 print("  ★  UPCOMING IPO WATCH  —  Not yet listed, monitor these")
 print(f"     Generated: {RUN_ET.strftime('%d %b %Y %H:%M ET')}")
 print("=" * 70)
 for ipo in UPCOMING_IPOS:
-    print(f"\n  ▸  {ipo['name']}  |  Expected ticker: {ipo['ticker']}  |  "
+    print(f"\n  ▸  {ipo['name']}  |  Ticker: {ipo['ticker']}  |  "
           f"Sector: {ipo['sector']}  |  Valuation: {ipo['valuation']}  |  Expected: {ipo['expected']}")
     words = ipo["why"].split()
     line, lines = "", []
@@ -803,7 +922,8 @@ print("\n  ✓ Chart saved → stock_classifier.png")
 
 export_cols = ["symbol","name","sector","category","price","last_close",
                "beta","cov","corr","ann_ret","ann_vol","sharpe",
-               "pe","fwd_pe","rev_g","margin","mktcap","target"]
+               "pe","fwd_pe","rev_g","margin","mktcap","target",
+               "hist_days","ipo_date"]
 out = df_all[[c for c in export_cols if c in df_all.columns]].copy()
 out.insert(0, "as_of_date",    DATA_END)
 out.insert(1, "generated_et",  RUN_ET.strftime("%Y-%m-%d %H:%M:%S ET"))
