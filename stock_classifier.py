@@ -23,10 +23,41 @@ import matplotlib.patches as mpatches
 import warnings
 import concurrent.futures
 import time
+import datetime
+import pytz
 warnings.filterwarnings("ignore")
 
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 200)
+
+# ── Live timestamp helpers ────────────────────────────────────────
+def now_utc() -> datetime.datetime:
+    return datetime.datetime.now(pytz.utc)
+
+def now_et() -> datetime.datetime:
+    """Eastern Time (US market time zone)."""
+    return datetime.datetime.now(pytz.timezone("America/New_York"))
+
+def fmt_dt(dt: datetime.datetime) -> str:
+    return dt.strftime("%A, %d %B %Y  %H:%M:%S %Z")
+
+def fmt_date(dt: datetime.datetime) -> str:
+    return dt.strftime("%Y-%m-%d")
+
+def market_status() -> str:
+    et = now_et()
+    weekday = et.weekday()          # 0=Mon … 6=Sun
+    hour    = et.hour + et.minute / 60
+    if weekday >= 5:
+        return "CLOSED (Weekend)"
+    if hour < 9.5:
+        return f"PRE-MARKET  (opens in {int((9.5 - hour) * 60)} min)"
+    if hour < 16.0:
+        return "OPEN"
+    return "AFTER-HOURS"
+
+RUN_UTC = now_utc()
+RUN_ET  = now_et()
 
 # ================================================================
 #  CONFIGURATION
@@ -391,26 +422,32 @@ def analyse(sym: str, mkt_returns: pd.Series, all_prices: pd.DataFrame) -> dict 
 
         rs = reasons(t, b_val, r_val, cat, ar_val, sh_val)
 
+        last_date = hist.index[-1]
+        last_close_str = (last_date.strftime("%d %b %Y")
+                          if hasattr(last_date, "strftime")
+                          else str(last_date)[:10])
+
         return {
-            "symbol":    sym,
-            "name":      name,
-            "sector":    sector,
-            "category":  cat,
-            "price":     price,
-            "beta":      b_val,
-            "cov":       c_val,
-            "corr":      r_val,
-            "sharpe":    sh_val,
-            "ann_ret":   ar_val,
-            "ann_vol":   av_val,
-            "tech":      t,
-            "preds":     preds,
-            "pe":        pe,
-            "fwd_pe":    fwd_pe,
-            "rev_g":     rev_g,
-            "margin":    margin,
-            "mktcap":    mktcap,
-            "reasons":   rs,
+            "symbol":     sym,
+            "name":       name,
+            "sector":     sector,
+            "category":   cat,
+            "price":      price,
+            "last_close": last_close_str,
+            "beta":       b_val,
+            "cov":        c_val,
+            "corr":       r_val,
+            "sharpe":     sh_val,
+            "ann_ret":    ar_val,
+            "ann_vol":    av_val,
+            "tech":       t,
+            "preds":      preds,
+            "pe":         pe,
+            "fwd_pe":     fwd_pe,
+            "rev_g":      rev_g,
+            "margin":     margin,
+            "mktcap":     mktcap,
+            "reasons":    rs,
         }
     except Exception:
         return None
@@ -421,7 +458,10 @@ def analyse(sym: str, mkt_returns: pd.Series, all_prices: pd.DataFrame) -> dict 
 
 print("=" * 70)
 print("  STOCK CLASSIFIER + PRICE PREDICTOR")
-print(f"  Universe: {len(STOCKS)} stocks  |  Period: {PERIOD}  |  Benchmark: S&P 500")
+print(f"  Run date : {fmt_dt(RUN_ET)}")
+print(f"  Run date : {fmt_dt(RUN_UTC)}")
+print(f"  Market   : {market_status()}")
+print(f"  Universe : {len(STOCKS)} stocks  |  Period: {PERIOD}  |  Benchmark: S&P 500")
 print("=" * 70)
 
 # Bulk download prices for fast parallel access
@@ -431,7 +471,11 @@ bulk = yf.download(all_tickers, period=PERIOD, auto_adjust=True, progress=False)
 if isinstance(bulk, pd.Series):
     bulk = bulk.to_frame()
 mkt_ret = bulk[MARKET].pct_change().dropna()
-print(f"  ✓ {bulk.shape[1]-1} instruments, {len(bulk)} days downloaded")
+
+DATA_START = bulk.index[0].strftime("%d %b %Y")
+DATA_END   = bulk.index[-1].strftime("%d %b %Y")
+print(f"  ✓ {bulk.shape[1]-1} instruments  |  {len(bulk)} trading days")
+print(f"  ✓ Data range: {DATA_START} → {DATA_END}  (latest close)")
 
 print(f"\n  [2/3] Analysing stocks in parallel ({WORKERS} threads)…")
 t0      = time.time()
@@ -491,7 +535,7 @@ for cat in CATEGORIES:
     print("=" * 70)
     print(f"  ★  {cat.upper()}")
     print(f"     {CAT_DESC[cat]}")
-    print(f"     {len(cat_rows)} stocks in category  |  Showing top {len(ranked)}")
+    print(f"     {len(cat_rows)} stocks in category  |  Showing top {len(ranked)}  |  As of {DATA_END}")
     print("=" * 70)
 
     for _, row in ranked.iterrows():
@@ -507,7 +551,7 @@ for cat in CATEGORIES:
         mc_str  = f"MCap ${r['mktcap']/1e9:.1f}B" if r["mktcap"] else ""
         fundamentals_line = "  ".join(filter(None, [pe_str, fpe_str, rg_str, mg_str, mc_str]))
 
-        print(f"\n  ▸  {r['name']} ({sym})  |  ${r['price']:.2f}  |  {r['sector']}")
+        print(f"\n  ▸  {r['name']} ({sym})  |  ${r['price']:.2f}  |  Last close: {r.get('last_close', DATA_END)}  |  {r['sector']}")
         print(f"     Beta: {r['beta']:+.3f}  |  Corr: {r['corr']:+.3f}  |  "
               f"Ann Return: {r['ann_ret']:+.1f}%  |  Sharpe: {r['sharpe']:.2f}  |  "
               f"Vol: {r['ann_vol']:.1f}%")
@@ -667,8 +711,9 @@ ax3.spines[:].set_color("#333355")
 ax3.grid(True, alpha=0.12, color="white", axis="x")
 
 plt.suptitle(
-    f"Stock Classifier + Price Predictor  |  Benchmark: S&P 500  |  Period: {PERIOD}  |  N={len(df)}",
-    color="white", fontsize=13, fontweight="bold", y=1.01,
+    f"Stock Classifier + Price Predictor  |  S&P 500 Benchmark  |  {PERIOD}  |  "
+    f"Data: {DATA_START} → {DATA_END}  |  Generated: {RUN_ET.strftime('%d %b %Y %H:%M ET')}  |  N={len(df)}",
+    color="white", fontsize=11, fontweight="bold", y=1.01,
 )
 plt.tight_layout()
 plt.savefig("stock_classifier.png", dpi=150, bbox_inches="tight", facecolor="#0d0f14")
@@ -681,7 +726,12 @@ print("\n  ✓ Chart saved → stock_classifier.png")
 
 export_cols = ["symbol","name","sector","category","price","beta","cov",
                "corr","ann_ret","ann_vol","sharpe","pe","fwd_pe","rev_g","margin"]
-df[export_cols].sort_values(["category","beta"], ascending=[True, False]) \
-               .round(4).to_csv("stock_classifier.csv", index=False)
-print("  ✓ Data exported → stock_classifier.csv")
+out = df[export_cols].sort_values(["category","beta"], ascending=[True, False]).round(4).copy()
+out.insert(0, "as_of_date",    DATA_END)
+out.insert(1, "generated_utc", RUN_UTC.strftime("%Y-%m-%d %H:%M:%S UTC"))
+out.insert(2, "generated_et",  RUN_ET.strftime("%Y-%m-%d %H:%M:%S ET"))
+out.to_csv("stock_classifier.csv", index=False)
+print(f"  ✓ Data exported → stock_classifier.csv  (as of {DATA_END})")
+print(f"  ✓ Generated: {fmt_dt(RUN_ET)}")
+print("=" * 70)
 print("=" * 70)
