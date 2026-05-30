@@ -851,6 +851,8 @@ for cat in CATEGORIES:
         # ── Reasons ────────────────────────────────────────────────
         print()
         for section, text in rdict.items():
+            if section == "TECHNICAL SETUP":
+                continue
             print(f"       [{section}]")
             words = text.split()
             line, lines = "", []
@@ -1059,3 +1061,242 @@ out.sort_values(["category","beta"], ascending=[True,False]).round(4) \
    .to_csv("stock_classifier.csv", index=False)
 
 print(f"  ✓ Exported → stock_classifier.csv  ({len(out)} rows, as of {DATA_END})")
+
+
+# ================================================================
+#  STOCK CHART  (historical price + Bear/Base/Bull predictions)
+# ================================================================
+
+def show_stock_chart(r, hist_df):
+    """
+    Dual-panel dark-theme chart for one stock:
+      Left  — full history: Close, SMA50, SMA200
+      Right — last 30 days + Bear/Base/Bull prediction lines per timeframe
+    """
+    import matplotlib.dates as mdates
+
+    close  = hist_df["Close"].dropna()
+    dates  = close.index
+
+    sma50  = close.rolling(50,  min_periods=1).mean()
+    sma200 = close.rolling(200, min_periods=1).mean()
+
+    sym   = r["symbol"]
+    price = r["price"]
+
+    # Build prediction date points (business-day approximation from last close)
+    last_date = dates[-1]
+    pred_dates = []
+    pred_bear, pred_base, pred_bull = [], [], []
+    for label, bdays in TIMEFRAMES:
+        future_dt = last_date + pd.tseries.offsets.BDay(bdays)
+        pred_dates.append(future_dt)
+        p = r["preds"][label]
+        pred_bear.append(p["bear"])
+        pred_base.append(p["base"])
+        pred_bull.append(p["bull"])
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
+    fig.patch.set_facecolor("#0d0f14")
+    fig.suptitle(
+        f"{r['name']} ({sym})  |  ${price:.2f}  |  {r['category']}  |  "
+        f"Beta: {r['beta']:+.3f}  Corr: {r['corr']:+.3f}  Sharpe: {r['sharpe']:.2f}",
+        color="white", fontsize=12, fontweight="bold", y=1.01
+    )
+
+    # ── Left panel: full history ────────────────────────────────
+    ax1.set_facecolor("#13161e")
+    ax1.plot(dates, close,  color="#4fc3f7", lw=1.2, label="Close")
+    ax1.plot(dates, sma50,  color="#ffa502", lw=1.0, ls="--", alpha=0.85, label="SMA 50")
+    ax1.plot(dates, sma200, color="#ff4757", lw=1.0, ls="--", alpha=0.85, label="SMA 200")
+    ax1.set_title("Historical Price", color="white", fontweight="bold")
+    ax1.set_xlabel("Date", color="white")
+    ax1.set_ylabel("Price ($)", color="white")
+    ax1.tick_params(colors="white")
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
+    ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    fig.autofmt_xdate(ax=ax1)
+    ax1.spines[:].set_color("#333355")
+    ax1.grid(True, alpha=0.12, color="white")
+    ax1.legend(facecolor="#0d0f14", edgecolor="#444", labelcolor="white", fontsize=9)
+
+    # ── Right panel: recent 30 days + predictions ───────────────
+    ax2.set_facecolor("#13161e")
+    recent_close = close.iloc[-30:]
+    recent_dates = dates[-30:]
+    ax2.plot(recent_dates, recent_close, color="#4fc3f7", lw=1.5, label="Close (recent)")
+    ax2.axvline(last_date, color="white", lw=0.8, ls=":", alpha=0.5)
+
+    ax2.plot([last_date] + pred_dates, [price] + pred_base,
+             color="#2ed573", lw=2.0, marker="o", ms=5, label="Base")
+    ax2.plot([last_date] + pred_dates, [price] + pred_bull,
+             color="#ffa502", lw=1.2, ls="--", marker="^", ms=4, label="Bull")
+    ax2.plot([last_date] + pred_dates, [price] + pred_bear,
+             color="#ff4757", lw=1.2, ls="--", marker="v", ms=4, label="Bear")
+    ax2.fill_between([last_date] + pred_dates,
+                     [price] + pred_bear, [price] + pred_bull,
+                     alpha=0.10, color="#2ed573")
+
+    for i, (label, _) in enumerate(TIMEFRAMES):
+        ax2.annotate(
+            f"${pred_base[i]:.2f}",
+            xy=(pred_dates[i], pred_base[i]),
+            xytext=(0, 8), textcoords="offset points",
+            color="#2ed573", fontsize=7, ha="center"
+        )
+
+    tf_labels = [l for l, _ in TIMEFRAMES]
+    ax2.set_xticks([last_date] + pred_dates)
+    ax2.set_xticklabels(["Now"] + tf_labels, rotation=30, ha="right", color="white", fontsize=8)
+    ax2.set_title("30-Day History + Bear / Base / Bull Predictions", color="white", fontweight="bold")
+    ax2.set_ylabel("Price ($)", color="white")
+    ax2.tick_params(colors="white", which="both")
+    ax2.spines[:].set_color("#333355")
+    ax2.grid(True, alpha=0.12, color="white")
+    ax2.legend(facecolor="#0d0f14", edgecolor="#444", labelcolor="white", fontsize=9)
+
+    plt.tight_layout()
+    plt.show()
+
+
+# ================================================================
+#  SINGLE-STOCK SEARCH  (used by Colab search bar below)
+# ================================================================
+
+def _print_reasons(rdict):
+    """Print reason sections, skipping TECHNICAL SETUP."""
+    for section, text in rdict.items():
+        if section == "TECHNICAL SETUP":
+            continue
+        print(f"       [{section}]")
+        words = text.split()
+        line, lines = "", []
+        for w in words:
+            if len(line) + len(w) + 1 <= 65:
+                line = (line + " " + w).strip()
+            else:
+                lines.append(line)
+                line = w
+        if line:
+            lines.append(line)
+        for l in lines:
+            print(f"         {l}")
+        print()
+
+
+def search_stock(sym):
+    """
+    Analyse and display a single ticker entered by the user.
+    Uses cached ohlcv_data if available; otherwise fetches fresh.
+    """
+    sym = sym.upper().strip()
+    if not sym:
+        print("  Please enter a ticker symbol.")
+        return
+
+    print(f"\n  Searching for: {sym} …")
+
+    # Use cached data if available, else download fresh
+    if sym in ohlcv_data:
+        hist = ohlcv_data[sym]
+    else:
+        raw = yf.download(sym, period=PERIOD, auto_adjust=True, progress=False)
+        if raw.empty or len(raw) < 60:
+            print(f"  No data found for {sym}. Check the ticker and try again.")
+            return
+        hist = pd.DataFrame({
+            "Close":  raw["Close"],
+            "High":   raw["High"],
+            "Low":    raw["Low"],
+            "Volume": raw["Volume"],
+        }).dropna(subset=["Close"])
+
+    r = analyse_price(sym, mkt_ret, {sym: hist})
+    if r is None:
+        print(f"  Could not analyse {sym} (insufficient history).")
+        return
+
+    enrich_fundamentals(r)
+
+    # ── compute rank score using full df_all for context ──────────
+    rank_score = 0.0
+    if "df_all" in globals() and not df_all.empty:
+        cat_sub = df_all[df_all["category"] == r["category"]].copy()
+        ranked_sub = rank_df(cat_sub, r["category"])
+        sym_row = ranked_sub[ranked_sub["symbol"] == sym]
+        if not sym_row.empty and "_s" in sym_row.columns:
+            rank_score = float(sym_row["_s"].values[0])
+
+    rdict = build_reasons(
+        r["tech"], r["beta"], r["corr"], r["category"],
+        r["ann_ret"], r["sharpe"], r["ann_vol"],
+        r["pe"], r["fwd_pe"], r["rev_g"], r["margin"], rank_score
+    )
+
+    mc_str  = f"  MCap ${r['mktcap']/1e9:.1f}B" if r.get("mktcap") else ""
+    tgt_str = f"  Analyst target ${r['target']:.2f}" if r.get("target") else ""
+    ipo_tag = "  ⚡ Recent IPO" if r["hist_days"] < RECENT_IPO_DAYS else ""
+
+    print("=" * 70)
+    print(f"  {r['name']} ({sym}){ipo_tag}")
+    print(f"  {r['category']}  |  ${r['price']:.2f}  |  Last close: {r['last_close']}")
+    print(f"  Sector: {r['sector']}{mc_str}{tgt_str}")
+    print(f"  Beta: {r['beta']:+.3f}  |  Corr: {r['corr']:+.3f}  |  Cov: {r['cov']:.6f}")
+    print(f"  Ann Return: {r['ann_ret']:+.1f}%  |  Volatility: {r['ann_vol']:.1f}%  |  Sharpe: {r['sharpe']:.2f}")
+    print("=" * 70)
+
+    print()
+    print(f"  {'TIMEFRAME':<12} {'BEAR':>10} {'BASE':>10} {'BULL':>10} {'CONF':>6} {'SIGNAL'}")
+    print(f"  {'─'*12} {'─'*10} {'─'*10} {'─'*10} {'─'*6} {'─'*13}")
+    for label, _ in TIMEFRAMES:
+        p      = r["preds"][label]
+        b_pct  = (p["bear"] / r["price"] - 1) * 100
+        bs_pct = (p["base"] / r["price"] - 1) * 100
+        bl_pct = (p["bull"] / r["price"] - 1) * 100
+        print(f"  {label:<12} "
+              f"${p['bear']:>8.2f} ({b_pct:+.1f}%)  "
+              f"${p['base']:>8.2f} ({bs_pct:+.1f}%)  "
+              f"${p['bull']:>8.2f} ({bl_pct:+.1f}%)  "
+              f"{p['conf']:>4}%  {p['signal']}")
+
+    print()
+    _print_reasons(rdict)
+
+    show_stock_chart(r, hist)
+
+
+# ================================================================
+#  COLAB SEARCH BAR  (interactive widget)
+# ================================================================
+
+try:
+    import ipywidgets as widgets
+    from IPython.display import display, clear_output
+
+    _search_box = widgets.Text(
+        placeholder="Enter ticker, e.g. AAPL",
+        description="Ticker:",
+        layout=widgets.Layout(width="220px"),
+    )
+    _search_btn = widgets.Button(
+        description="Analyse",
+        button_style="primary",
+        layout=widgets.Layout(width="100px"),
+    )
+    _search_out = widgets.Output()
+
+    def _on_search(b):
+        with _search_out:
+            clear_output(wait=True)
+            search_stock(_search_box.value.strip().upper())
+
+    _search_btn.on_click(_on_search)
+    _search_box.on_submit(_on_search)   # also fires on Enter key
+
+    print("\n" + "=" * 70)
+    print("  STOCK SEARCH  —  type any ticker and press Analyse or Enter")
+    print("=" * 70)
+    display(widgets.HBox([_search_box, _search_btn]), _search_out)
+
+except ImportError:
+    print("\n  (ipywidgets not available — call search_stock('AAPL') directly)")
